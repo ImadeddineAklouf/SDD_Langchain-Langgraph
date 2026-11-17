@@ -1,0 +1,6 @@
+.env
+out/
+__pycache__/
+*.egg-info/
+.venv/
+docs/rapport/build/

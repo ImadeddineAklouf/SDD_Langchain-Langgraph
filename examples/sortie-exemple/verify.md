@@ -1,0 +1,9 @@
+# Vérification
+
+Résultat : ✅ OK
+
+```
+..........                                                               [100%]
+10 passed in 0.04s
+
+```

@@ -1,0 +1,113 @@
+{
+ "requirements": [
+  {
+   "id": "REQ-001",
+   "kind": "constraint",
+   "statement": "Le code est écrit en Python 3.11.",
+   "citations": [
+    {
+     "source_id": "C-001",
+     "quote": "Le code est écrit en Python 3.11."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-002",
+   "kind": "constraint",
+   "statement": "Les tests utilisent pytest.",
+   "citations": [
+    {
+     "source_id": "C-002",
+     "quote": "Les tests utilisent pytest."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-003",
+   "kind": "functional",
+   "statement": "Chaque fonctionnalité est couverte par au moins un test pytest.",
+   "citations": [
+    {
+     "source_id": "C-003",
+     "quote": "Chaque fonctionnalité est couverte par au moins un test pytest."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-004",
+   "kind": "constraint",
+   "statement": "Aucune dépendance externe en dehors de la bibliothèque standard et de pytest.",
+   "citations": [
+    {
+     "source_id": "C-004",
+     "quote": "Aucune dépendance externe en dehors de la bibliothèque standard et de pytest."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-005",
+   "kind": "functional",
+   "statement": "L'utilisateur peut ajouter une tâche avec un titre.",
+   "citations": [
+    {
+     "source_id": "B-001",
+     "quote": "L'utilisateur peut ajouter une tâche avec un titre."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-006",
+   "kind": "functional",
+   "statement": "L'utilisateur peut lister les tâches.",
+   "citations": [
+    {
+     "source_id": "B-002",
+     "quote": "L'utilisateur peut lister les tâches."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-007",
+   "kind": "functional",
+   "statement": "L'utilisateur peut marquer une tâche comme terminée.",
+   "citations": [
+    {
+     "source_id": "B-003",
+     "quote": "L'utilisateur peut marquer une tâche comme terminée."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-008",
+   "kind": "functional",
+   "statement": "Les tâches sont sauvegardées dans un fichier JSON local.",
+   "citations": [
+    {
+     "source_id": "B-004",
+     "quote": "Les tâches sont sauvegardées dans un fichier JSON local."
+    }
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "REQ-009",
+   "kind": "functional",
+   "statement": "Chaque tâche possède un identifiant entier attribué à la création, en commençant à 1.",
+   "citations": [
+    {
+     "source_id": "A-001",
+     "quote": "Chaque tâche a un identifiant entier attribué à la création, en commençant à 1."
+    }
+   ],
+   "acceptance_criteria": []
+  }
+ ],
+ "open_questions": []
+}

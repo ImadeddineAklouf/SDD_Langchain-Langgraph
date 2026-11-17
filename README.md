@@ -1,0 +1,54 @@
+# SDD Pipeline déterministe (LangChain + LangGraph)
+
+Workflow **Spec-Driven Development** complet, avec les mêmes étapes que GitHub spec-kit :
+**constitution → specify → clarify → plan → tasks → analyze → implement**.
+Le LLM **transforme** les entrées mais n'a jamais le droit d'**inventer**.
+
+📘 Le rapport complet (concepts, architecture, code, choix, exécution réelle) est dans
+[`docs/rapport-sdd-pipeline.pdf`](docs/rapport-sdd-pipeline.pdf).
+
+## Principe : le LLM propose, du code déterministe dispose
+
+| Garde-fou | Où | Ce qu'il empêche |
+|---|---|---|
+| Découpage constitution/brief en énoncés `C-001`, `B-001`… **sans LLM** | `ingest.py` | sources non identifiables |
+| Sortie structurée `json_schema` + Pydantic `extra="forbid"`, température 0 | `llm.py`, `models.py` | champs inventés, texte libre |
+| Citation **mot pour mot** obligatoire pour chaque exigence | `validate_spec` | exigences sans origine |
+| **Ancrage lexical** (≥ 70 % des mots porteurs présents dans les sources) | `grounding_ratio` | ajouts (« priorité », « OAuth »…) |
+| Chaque phrase du brief → exigence **ou** question ouverte | `validate_spec` | oublis silencieux |
+| `clarify` ne produit que des questions ; les réponses humaines deviennent des sources `A-xxx` | `clarify`, `_add_human_input` | suppositions |
+| Choix techno uniquement s'ils sont **nommés** dans une source | `validate_plan` | stack inventée |
+| Tâches liées à exigence + plan, critères d'acceptation **copiés** | `validate_tasks` | tâches « bonus » |
+| `analyze` : contrôle croisé spec ↔ plan ↔ tâches **sans LLM** | `validators.analyze` | incohérences |
+| L'implémentation ne touche **que** les fichiers déclarés ; contrôle syntaxique | `validate_implementation` | effets de bord, code cassé |
+| `verify` lance pytest ; `fix` n'a pas le droit de modifier les tests | `run_tests`, `validate_fix` | « triche » sur les tests |
+| Boucles de correction bornées, points de contrôle humains (`interrupt`) | `graph.py` | décisions sans l'humain |
+
+## Graphe LangGraph
+
+```
+START → constitution → specify → clarify → review_spec ⏸ → plan → review_plan ⏸ → tasks → analyze ⏸
+      → implement → review_impl ⏸ (une tâche à la fois) → verify ⇄ fix → review_verify ⏸ → END
+```
+
+Usage standard de LangGraph : `StateGraph`, arêtes conditionnelles, `interrupt()` + `Command(resume=…)`,
+checkpointer SQLite (reprise avec `--thread`). Côté LangChain : `ChatPromptTemplate | llm.with_structured_output(...)`
+(LCEL) et `with_fallbacks` pour le modèle de secours.
+
+## Modèle gratuit
+
+Par défaut **Groq + `openai/gpt-oss-120b`** (gratuit, rapide, sortie JSON Schema), avec bascule automatique sur
+`openai/gpt-oss-20b` si le quota journalier est atteint. Alternatives via `.env` : `SDD_PROVIDER=ollama`
+(local) ou `gemini`.
+
+## Démarrage
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"          # + ".[ollama]" ou ".[gemini]" si besoin
+cp .env.example .env              # renseigner GROQ_API_KEY
+sdd examples/brief.md --constitution examples/constitution.md --require-tests
+pytest                            # 14 tests hors ligne avec un faux LLM
+```
+
+Le code généré est exécuté par pytest : à lancer de préférence dans un environnement isolé.

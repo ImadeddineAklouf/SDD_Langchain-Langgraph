@@ -1,0 +1,73 @@
+{
+ "items": [
+  {
+   "id": "PLN-001",
+   "kind": "component",
+   "title": "Task Manager Application",
+   "description": "Composant principal qui gère les tâches, l'ajout, la liste, la mise à jour et la persistance.",
+   "requirement_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-004",
+    "REQ-005",
+    "REQ-006",
+    "REQ-007",
+    "REQ-008",
+    "REQ-009"
+   ]
+  },
+  {
+   "id": "PLN-002",
+   "kind": "data_model",
+   "title": "Task",
+   "description": "Modèle de données représentant une tâche avec id, titre et statut.",
+   "requirement_ids": [
+    "REQ-009"
+   ]
+  },
+  {
+   "id": "PLN-003",
+   "kind": "interface",
+   "title": "Task Persistence",
+   "description": "Interface pour la sauvegarde et le chargement des tâches depuis un fichier JSON.",
+   "requirement_ids": [
+    "REQ-008"
+   ]
+  },
+  {
+   "id": "PLN-004",
+   "kind": "interface",
+   "title": "Command Line Interface",
+   "description": "Interface utilisateur pour ajouter, lister et terminer des tâches.",
+   "requirement_ids": [
+    "REQ-005",
+    "REQ-006",
+    "REQ-007"
+   ]
+  },
+  {
+   "id": "PLN-005",
+   "kind": "decision",
+   "title": "Test Coverage Strategy",
+   "description": "Stratégie de tests pytest couvrant chaque fonctionnalité.",
+   "requirement_ids": [
+    "REQ-003"
+   ]
+  }
+ ],
+ "tech_choices": [
+  {
+   "name": "Python 3.11",
+   "source_ids": [
+    "C-001"
+   ]
+  },
+  {
+   "name": "pytest",
+   "source_ids": [
+    "C-002"
+   ]
+  }
+ ],
+ "open_questions": []
+}

@@ -1,0 +1,32 @@
+[project]
+name = "sdd-pipeline"
+version = "0.1.0"
+description = "Workflow Spec-Driven Development déterministe avec LangGraph"
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=1.0",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "langchain-core>=1.0",
+  "langchain-groq>=1.0",
+  "pydantic>=2.7",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+ollama = ["langchain-ollama>=1.0"]
+gemini = ["langchain-google-genai>=3.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+sdd = "sdd.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

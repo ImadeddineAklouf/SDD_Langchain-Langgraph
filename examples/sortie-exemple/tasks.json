@@ -1,0 +1,220 @@
+{
+ "tasks": [
+  {
+   "id": "T-001",
+   "title": "Créer le modèle de données Task",
+   "description": "Définir la classe Task avec id, titre et statut, en suivant le modèle de données.",
+   "requirement_ids": [
+    "REQ-009"
+   ],
+   "plan_item_ids": [
+    "PLN-002"
+   ],
+   "depends_on": [],
+   "files": [
+    "src/task.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-002",
+   "title": "Implémenter l'interface de persistance",
+   "description": "Créer la classe TaskPersistence pour sauvegarder et charger les tâches depuis un fichier JSON local.",
+   "requirement_ids": [
+    "REQ-008"
+   ],
+   "plan_item_ids": [
+    "PLN-003"
+   ],
+   "depends_on": [],
+   "files": [
+    "src/persistence.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-003",
+   "title": "Développer le composant Task Manager",
+   "description": "Mettre en place la logique d'ajout, de listing et de mise à jour des tâches, en utilisant le modèle Task et la persistance.",
+   "requirement_ids": [
+    "REQ-005",
+    "REQ-006",
+    "REQ-007",
+    "REQ-009"
+   ],
+   "plan_item_ids": [
+    "PLN-001",
+    "PLN-002",
+    "PLN-003"
+   ],
+   "depends_on": [],
+   "files": [
+    "src/task_manager.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-004",
+   "title": "Créer l'interface en ligne de commande",
+   "description": "Fournir des commandes pour ajouter, lister et terminer des tâches via la CLI.",
+   "requirement_ids": [
+    "REQ-005",
+    "REQ-006",
+    "REQ-007"
+   ],
+   "plan_item_ids": [
+    "PLN-004",
+    "PLN-001"
+   ],
+   "depends_on": [],
+   "files": [
+    "src/cli.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-005",
+   "title": "Écrire le test d'ajout de tâche",
+   "description": "Test pytest pour vérifier que l'utilisateur peut ajouter une tâche avec un titre.",
+   "requirement_ids": [
+    "REQ-005"
+   ],
+   "plan_item_ids": [
+    "PLN-005"
+   ],
+   "depends_on": [],
+   "files": [
+    "tests/test_add_task.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-006",
+   "title": "Écrire le test de listing des tâches",
+   "description": "Test pytest pour vérifier que l'utilisateur peut lister les tâches.",
+   "requirement_ids": [
+    "REQ-006"
+   ],
+   "plan_item_ids": [
+    "PLN-005"
+   ],
+   "depends_on": [],
+   "files": [
+    "tests/test_list_tasks.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-007",
+   "title": "Écrire le test de marquage d'une tâche terminée",
+   "description": "Test pytest pour vérifier que l'utilisateur peut marquer une tâche comme terminée.",
+   "requirement_ids": [
+    "REQ-007"
+   ],
+   "plan_item_ids": [
+    "PLN-005"
+   ],
+   "depends_on": [],
+   "files": [
+    "tests/test_mark_task_done.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-008",
+   "title": "Écrire le test de persistance des tâches",
+   "description": "Test pytest pour vérifier que les tâches sont sauvegardées dans un fichier JSON local.",
+   "requirement_ids": [
+    "REQ-008"
+   ],
+   "plan_item_ids": [
+    "PLN-005"
+   ],
+   "depends_on": [],
+   "files": [
+    "tests/test_persistence.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-009",
+   "title": "Écrire le test de l'attribution d'identifiant de tâche",
+   "description": "Test pytest pour vérifier que chaque tâche possède un identifiant entier attribué à la création, en commençant à 1.",
+   "requirement_ids": [
+    "REQ-009"
+   ],
+   "plan_item_ids": [
+    "PLN-005"
+   ],
+   "depends_on": [],
+   "files": [
+    "tests/test_task_id_assignment.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-010",
+   "title": "Écrire le test de stratégie de couverture",
+   "description": "Test pytest pour vérifier que chaque fonctionnalité est couverte par au moins un test.",
+   "requirement_ids": [
+    "REQ-003"
+   ],
+   "plan_item_ids": [
+    "PLN-005"
+   ],
+   "depends_on": [],
+   "files": [
+    "tests/test_coverage_strategy.py"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-011",
+   "title": "Spécifier la version Python 3.11",
+   "description": "Créer un fichier .python-version indiquant la version Python 3.11 utilisée pour le projet.",
+   "requirement_ids": [
+    "REQ-001"
+   ],
+   "plan_item_ids": [
+    "PLN-001"
+   ],
+   "depends_on": [],
+   "files": [
+    ".python-version"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-012",
+   "title": "Définir l'utilisation de pytest",
+   "description": "Créer un fichier requirements.txt contenant uniquement la dépendance pytest.",
+   "requirement_ids": [
+    "REQ-002"
+   ],
+   "plan_item_ids": [
+    "PLN-001"
+   ],
+   "depends_on": [],
+   "files": [
+    "requirements.txt"
+   ],
+   "acceptance_criteria": []
+  },
+  {
+   "id": "T-013",
+   "title": "Vérifier l'absence de dépendances externes",
+   "description": "Créer un fichier constraints.txt listant les seules dépendances autorisées (standard library + pytest).",
+   "requirement_ids": [
+    "REQ-004"
+   ],
+   "plan_item_ids": [
+    "PLN-001"
+   ],
+   "depends_on": [],
+   "files": [
+    "constraints.txt"
+   ],
+   "acceptance_criteria": []
+  }
+ ]
+}

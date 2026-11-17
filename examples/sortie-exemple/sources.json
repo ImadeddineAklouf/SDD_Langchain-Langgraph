@@ -1,0 +1,47 @@
+[
+ {
+  "id": "C-001",
+  "text": "Le code est écrit en Python 3.11.",
+  "origin": "constitution"
+ },
+ {
+  "id": "C-002",
+  "text": "Les tests utilisent pytest.",
+  "origin": "constitution"
+ },
+ {
+  "id": "C-003",
+  "text": "Chaque fonctionnalité est couverte par au moins un test pytest.",
+  "origin": "constitution"
+ },
+ {
+  "id": "C-004",
+  "text": "Aucune dépendance externe en dehors de la bibliothèque standard et de pytest.",
+  "origin": "constitution"
+ },
+ {
+  "id": "B-001",
+  "text": "L'utilisateur peut ajouter une tâche avec un titre.",
+  "origin": "brief"
+ },
+ {
+  "id": "B-002",
+  "text": "L'utilisateur peut lister les tâches.",
+  "origin": "brief"
+ },
+ {
+  "id": "B-003",
+  "text": "L'utilisateur peut marquer une tâche comme terminée.",
+  "origin": "brief"
+ },
+ {
+  "id": "B-004",
+  "text": "Les tâches sont sauvegardées dans un fichier JSON local.",
+  "origin": "brief"
+ },
+ {
+  "id": "A-001",
+  "text": "Comment l'utilisateur identifie-t-il une tâche lorsqu'il la marque comme terminée ? Utilise-t-on un identifiant unique, le titre, ou un autre mécanisme ? Réponse : Chaque tâche a un identifiant entier attribué à la création, en commençant à 1.",
+  "origin": "answer"
+ }
+]
