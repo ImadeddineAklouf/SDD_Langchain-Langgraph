@@ -57,6 +57,7 @@ def test_streamlit_app_runs_full_workflow(tmp_path, monkeypatch):
     monkeypatch.setattr(sdd.llm, "get_llm", lambda *a, **k: scripted_llm())
     monkeypatch.setattr(sdd.llm, "get_fallback_llm", lambda: None)
     monkeypatch.setattr(sdd.llm, "ollama_models", lambda: ["qwen3:14b"])
+    monkeypatch.setattr(sdd.llm, "gemini_models", lambda: ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.8-flash-lite"])
     monkeypatch.delenv("SDD_PROVIDER", raising=False)
     monkeypatch.delenv("SDD_MODEL", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "test")
@@ -64,8 +65,10 @@ def test_streamlit_app_runs_full_workflow(tmp_path, monkeypatch):
     # from_file : ui.py est exécuté comme script principal, exactement comme avec `streamlit run`
     at = AppTest.from_file(sdd.ui.__file__, default_timeout=30).run()
     assert not at.exception
-    assert at.selectbox[0].value == "gemini" and at.text_input[0].value == "gemini-2.5-flash"
-    assert not at.sidebar.warning  # clé présente : rien à signaler
+    # modèle choisi dans la liste réelle des modèles de la clé
+    assert at.selectbox[0].value == "gemini" and at.selectbox[1].value == "gemini-3.8-flash"
+    assert at.selectbox[2].value == "(aucun)"
+    assert not at.sidebar.warning  # clé présente, modèle disponible : rien à signaler
     at.text_area[0].set_value(BRIEF)
     at.text_area[1].set_value(CONSTITUTION)
     next(b for b in at.button if "Lancer" in b.label).click().run()

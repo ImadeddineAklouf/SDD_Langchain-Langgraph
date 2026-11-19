@@ -96,7 +96,7 @@ def render() -> None:
     # ------------------------------ barre latérale ------------------------------
     with st.sidebar:
         st.header("Configuration")
-        from sdd.llm import API_KEYS, DEFAULTS, PROVIDERS, fallback_name, ollama_models, provider
+        from sdd.llm import API_KEYS, DEFAULTS, PROVIDERS, fallback_name, gemini_models, ollama_models, provider
 
         prov = st.selectbox("Fournisseur", PROVIDERS, index=PROVIDERS.index(provider()) if provider() in PROVIDERS else 0,
                             help="gemini / groq : API en ligne gratuites (avec quotas). ollama : LLM local, à installer soi-même.")
@@ -104,10 +104,23 @@ def render() -> None:
             os.environ.pop("SDD_MODEL", None)
             os.environ.pop("SDD_FALLBACK_MODEL", None)
         os.environ["SDD_PROVIDER"] = prov
-        model = st.text_input("Modèle", value=os.getenv("SDD_MODEL") or DEFAULTS[prov], key=f"model_{prov}").strip()
+        wanted = os.getenv("SDD_MODEL") or DEFAULTS[prov]
+        available = st.cache_data(ttl=600, show_spinner=False)(lambda _key: gemini_models())(
+            os.getenv("GOOGLE_API_KEY")) if prov == "gemini" else None
+        if available:  # liste réelle des modèles ouverts pour cette clé
+            if wanted not in available:
+                st.warning(f"`{wanted}` n'est pas disponible pour votre clé : choisissez un modèle ci-dessous.")
+                wanted = DEFAULTS[prov] if DEFAULTS[prov] in available else available[0]
+            model = st.selectbox("Modèle", available, index=available.index(wanted), key=f"model_{prov}_list")
+            fb_options = ["(aucun)"] + [m for m in available if m != model]
+            fb = fallback_name() if fallback_name() in fb_options else "(aucun)"
+            fb = st.selectbox("Modèle de secours (si quota atteint)", fb_options, index=fb_options.index(fb))
+            os.environ["SDD_FALLBACK_MODEL"] = "" if fb == "(aucun)" else fb
+        else:
+            model = st.text_input("Modèle", value=wanted, key=f"model_{prov}").strip()
+            if fallback_name():
+                st.caption(f"Modèle de secours : **{fallback_name()}**")
         os.environ["SDD_MODEL"] = model
-        if fallback_name():
-            st.caption(f"Modèle de secours : **{fallback_name()}**")
         if prov == "ollama":
             pulled = ollama_models()
             if pulled is None:
@@ -177,8 +190,11 @@ def render() -> None:
                 ss.finished = ss.pending is None
                 ss.error = None
                 status.update(label="Point de contrôle : à vous de décider" if ss.pending else "Workflow terminé", state="complete")
-            except Exception as exc:  # erreur API (clé, quota…) : la session reste reprenable
-                ss.error = f"Erreur : {exc}. La session `{ss.thread}` peut être reprise depuis la barre latérale."
+            except Exception as exc:  # erreur API (clé, modèle, quota, réseau) : la session reste reprenable
+                from sdd.llm import explain_error
+
+                ss.error = (f"{explain_error(exc)}\n\nLa session `{ss.thread}` est conservée : corrigez puis cliquez "
+                            "sur « Reprendre là où le workflow s'est arrêté ».")
                 status.update(label="Erreur", state="error")
         st.rerun()
 

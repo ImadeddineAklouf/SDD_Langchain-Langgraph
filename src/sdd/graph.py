@@ -27,7 +27,7 @@ from langgraph.types import interrupt
 
 from . import prompts, render
 from .ingest import split_statements
-from .llm import structured_method
+from .llm import is_api_error, structured_method
 from .models import Clarifications, Implementation, Plan, Review, SourceStatement, Spec, TaskList
 from .validators import (
     analyze,
@@ -98,7 +98,9 @@ def generate(llm, schema, system: str, payload: str, validate: Callable[[Any], l
             out = chain.invoke({"input": payload, "corrections": corrections})
             obj = out if isinstance(out, schema) else schema.model_validate(out)
             errors = validate(obj)
-        except Exception as exc:  # sortie non conforme au schéma / refus de l'API
+        except Exception as exc:
+            if is_api_error(exc):  # clé, modèle introuvable, réseau, quota : inutile de redemander
+                raise
             errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
         if not errors:
             return obj, []
