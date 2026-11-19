@@ -1,6 +1,6 @@
 """Fabrique de modèle. Température 0 partout, fournisseur choisi par variable d'env.
 
-SDD_PROVIDER = ollama (défaut, 100 % local) | groq | gemini
+SDD_PROVIDER = gemini (défaut, API Google gratuite) | groq | ollama (local, optionnel)
 SDD_MODEL    = nom du modèle (défaut selon le fournisseur)
 SDD_FALLBACK_MODEL = modèle de secours si le principal échoue (quota...)
 SDD_NUM_CTX  = taille du contexte Ollama en tokens (défaut 16384)
@@ -11,18 +11,19 @@ from __future__ import annotations
 
 import os
 
-PROVIDERS = ["ollama", "groq", "gemini"]
+PROVIDERS = ["gemini", "groq", "ollama"]
 DEFAULTS = {
-    "ollama": "qwen3:14b",
-    "groq": "openai/gpt-oss-120b",
     "gemini": "gemini-2.5-flash",
+    "groq": "openai/gpt-oss-120b",
+    "ollama": "qwen3:14b",
 }
-FALLBACKS = {"groq": "openai/gpt-oss-20b"}
+# Secours chez le même fournisseur (même clé, quota séparé) : bascule automatique si le principal échoue.
+FALLBACKS = {"gemini": "gemini-2.5-flash-lite", "groq": "openai/gpt-oss-20b"}
 API_KEYS = {"groq": "GROQ_API_KEY", "gemini": "GOOGLE_API_KEY"}
 
 
 def provider() -> str:
-    return os.getenv("SDD_PROVIDER", "ollama").lower()
+    return os.getenv("SDD_PROVIDER", "gemini").lower()
 
 
 def model_name() -> str:
@@ -42,19 +43,20 @@ def get_fallback_llm():
 def get_llm(model: str | None = None):
     p = provider()
     model = model or model_name()
+    if p == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        # max_retries : le tier gratuit limite les requêtes par minute ; on patiente au lieu d'échouer.
+        return ChatGoogleGenerativeAI(model=model, temperature=0, seed=42, max_retries=6)
+    if p == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(model=model, temperature=0, max_retries=2, model_kwargs={"seed": 42})
     if p == "ollama":
         from langchain_ollama import ChatOllama
 
         # num_ctx : le contexte par défaut d'Ollama est court ; au-delà, l'entrée serait tronquée sans erreur.
         return ChatOllama(model=model, temperature=0, seed=42, num_ctx=int(os.getenv("SDD_NUM_CTX", "16384")))
-    if p == "groq":
-        from langchain_groq import ChatGroq
-
-        return ChatGroq(model=model, temperature=0, max_retries=2, model_kwargs={"seed": 42})
-    if p == "gemini":
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        return ChatGoogleGenerativeAI(model=model, temperature=0)
     raise ValueError(f"Fournisseur inconnu : {p}")
 
 
@@ -70,6 +72,6 @@ def ollama_models() -> list[str] | None:
 
 def structured_method() -> str:
     """Méthode de sortie structurée. json_schema = le fournisseur contraint la génération
-    au schéma JSON (le modèle ne peut pas répondre en texte libre). Avec Ollama, le schéma est
-    passé dans le paramètre `format` : la génération est contrainte token par token."""
+    au schéma JSON (le modèle ne peut pas répondre en texte libre). Gemini reçoit le schéma dans
+    `response_json_schema`, Ollama dans `format` : dans les deux cas la génération est contrainte."""
     return os.getenv("SDD_STRUCTURED_METHOD", "json_schema")

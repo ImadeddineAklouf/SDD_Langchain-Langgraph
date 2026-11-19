@@ -99,7 +99,7 @@ def render() -> None:
         from sdd.llm import API_KEYS, DEFAULTS, PROVIDERS, fallback_name, ollama_models, provider
 
         prov = st.selectbox("Fournisseur", PROVIDERS, index=PROVIDERS.index(provider()) if provider() in PROVIDERS else 0,
-                            help="ollama : 100 % local et sans quota. groq / gemini : API en ligne gratuite avec quotas.")
+                            help="gemini / groq : API en ligne gratuites (avec quotas). ollama : LLM local, à installer soi-même.")
         if prov != provider():  # changement de fournisseur : on repart de son modèle par défaut
             os.environ.pop("SDD_MODEL", None)
             os.environ.pop("SDD_FALLBACK_MODEL", None)
@@ -111,7 +111,7 @@ def render() -> None:
         if prov == "ollama":
             pulled = ollama_models()
             if pulled is None:
-                st.error("Ollama ne répond pas. Ouvrez l'application Ollama (ou lancez `ollama serve`).")
+                st.error("Ollama ne répond pas (ou `pip install -e \".[ollama]\"` manquant).")
             elif model not in pulled and f"{model}:latest" not in pulled:
                 st.warning(f"Modèle absent. Dans un terminal : `ollama pull {model}`")
                 if pulled:

@@ -124,11 +124,11 @@ Un *chat model* est un objet qui représente un LLM conversationnel. Tous les fo
 Google, Ollama…) exposent la même interface : `invoke(messages)` renvoie un message de réponse. Dans le projet :
 
 ```python
-from langchain_ollama import ChatOllama
-llm = ChatOllama(model="qwen3:14b", temperature=0, seed=42, num_ctx=16384)
+from langchain_google_genai import ChatGoogleGenerativeAI
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, seed=42, max_retries=6)
 ```
 
-Changer de fournisseur revient à changer de classe (`ChatGroq`, `ChatGoogleGenerativeAI`) : le reste du code
+Changer de fournisseur revient à changer de classe (`ChatGroq`, `ChatOllama`) : le reste du code
 ne bouge pas. C'est tout l'intérêt de l'abstraction, et c'est ce que fait `src/sdd/llm.py`.
 
 **`temperature=0`** demande au modèle de choisir systématiquement le mot le plus probable : c'est le réglage le
@@ -546,11 +546,12 @@ Le tier gratuit de Groq limite notamment le nombre de **tokens par jour et par m
 propre quota), branché avec le mécanisme standard `with_fallbacks` (chapitre 3.7). Le secours est plus petit,
 donc un peu moins fiable, mais il est soumis aux mêmes schémas et aux mêmes validateurs.
 
-## 9.4 Le passage au local : Ollama par défaut
+## 9.4 Un essai en local : Ollama
 
 À l'usage, le quota journalier de Groq est atteint en une ou deux exécutions complètes : un travail itératif
 (réviser, relancer) devient impossible. Le fournisseur par défaut est donc devenu **Ollama**, qui fait tourner
-le modèle sur la machine (sur un Mac Apple Silicon, la mémoire unifiée sert de mémoire GPU).
+le modèle sur la machine (sur un Mac Apple Silicon, la mémoire unifiée sert de mémoire GPU). Cette option est
+toujours disponible (`pip install -e ".[ollama]"`, puis `--provider ollama`), mais n'est plus le défaut (9.5).
 
 - **Modèle par défaut : `qwen3:14b`** (environ 9 Go). Il tient sur un Mac de 16 Go, suit bien les consignes et
   gère correctement les sorties structurées. Alternative : `gpt-oss:20b` (environ 14 Go), de la même famille que
@@ -572,13 +573,35 @@ Dans l'interface web, la barre latérale permet de choisir le fournisseur et le 
 répond et que le modèle est téléchargé (sinon elle affiche la commande `ollama pull` à lancer). En ligne de
 commande : `--provider` et `--model`.
 
-## 9.5 Récapitulatif des fournisseurs
+## 9.5 Le choix final : Gemini, sans LLM sur la machine
 
-| `SDD_PROVIDER` | Modèle par défaut | Avantages | Inconvénients |
-|---|---|---|---|
-| `ollama` (défaut) | `qwen3:14b` | 100 % local, hors ligne, privé, sans quota | plus lent, modèle plus petit |
-| `groq` | `openai/gpt-oss-120b` | gratuit, très rapide, gros modèle | quotas journaliers, données envoyées à un tiers |
-| `gemini` | `gemini-2.5-flash` | quota gratuit généreux, gros contexte | données du tier gratuit utilisables pour l'entraînement |
+L'essai d'Ollama a buté sur l'installation : sur le Mac de l'utilisateur, le service Ollama ne démarrait pas
+(`brew services` en erreur), et faire tourner un modèle de 9 Go en local n'était de toute façon pas souhaité.
+Le fournisseur par défaut est donc devenu **Google Gemini**, via son API gratuite :
+
+- **Modèle principal : `gemini-2.5-flash`**, rapide, bon en sortie structurée, avec un très grand contexte (plus
+  d'un million de tokens) : l'étape `implement` peut recevoir tout le code déjà écrit sans troncature.
+- **Secours : `gemini-2.5-flash-lite`**, branché avec `with_fallbacks` comme pour Groq. Même clé API, mais quota
+  séparé : quand le quota du modèle principal est atteint, le pipeline continue sur le secours.
+- **Sortie structurée** : avec `method="json_schema"`, `ChatGoogleGenerativeAI.with_structured_output` envoie
+  `response_mime_type="application/json"` et le JSON Schema Pydantic dans `response_json_schema`. Gemini génère
+  alors uniquement du JSON conforme. Un test le vérifie
+  (`test_gemini_structured_output_constrains_generation_to_schema`).
+- **Limite par minute** : le tier gratuit limite aussi le nombre de requêtes par minute. `max_retries=6` fait
+  patienter le client (avec attente croissante) au lieu d'échouer au premier refus.
+- **Clé** : créée gratuitement sur Google AI Studio, placée dans `.env` (`GOOGLE_API_KEY`), jamais dans le code.
+- **Contrepartie** : les données envoyées au tier gratuit peuvent servir à Google pour améliorer ses modèles ;
+  à éviter pour du code confidentiel.
+
+Groq et Ollama restent sélectionnables sans changer de code (barre latérale de l'UI, `--provider`, `.env`).
+
+## 9.6 Récapitulatif des fournisseurs
+
+| `SDD_PROVIDER` | Modèle par défaut | Secours | Avantages | Inconvénients |
+|---|---|---|---|---|
+| `gemini` (défaut) | `gemini-2.5-flash` | `gemini-2.5-flash-lite` | gratuit, rien à installer, très grand contexte | quotas par minute et par jour, données du tier gratuit utilisables par Google |
+| `groq` | `openai/gpt-oss-120b` | `openai/gpt-oss-20b` | gratuit, très rapide, gros modèle | quota journalier vite atteint |
+| `ollama` (optionnel) | `qwen3:14b` | aucun | 100 % local, privé, sans quota | à installer, lent, modèle plus petit |
 
 Le modèle exact se règle avec `SDD_MODEL` ; la méthode de sortie structurée avec `SDD_STRUCTURED_METHOD`. La
 liste des modèles gratuits évolue vite : c'est pourquoi rien n'est figé dans le code métier.
@@ -616,7 +639,7 @@ sdd-pipeline/
 └── tests/
     ├── test_pipeline.py    tests hors ligne du pipeline
     ├── test_ui.py          tests hors ligne de l'interface
-    └── test_llm.py         fabrique de modèle (Ollama par défaut)
+    └── test_llm.py         fabrique de modèle (Gemini par défaut)
 ```
 
 ## 10.2 `models.py`
@@ -640,7 +663,7 @@ mot, respecter le schéma, ne jamais répondre en texte libre, rédiger en fran�
 
 ## 10.5 `llm.py`
 
-`get_llm()` lit `SDD_PROVIDER` (défaut `ollama`) et `SDD_MODEL` et instancie le bon chat model, toujours avec
+`get_llm()` lit `SDD_PROVIDER` (défaut `gemini`) et `SDD_MODEL` et instancie le bon chat model, toujours avec
 `temperature=0` (et un `seed` quand le fournisseur le permet ; `num_ctx` pour Ollama). `ollama_models()` liste
 les modèles téléchargés localement, pour que l'interface puisse prévenir s'il en manque un. Les imports sont faits à l'intérieur de la fonction : on
 n'installe que le paquet du fournisseur utilisé. `structured_method()` renvoie la méthode de sortie structurée.
@@ -733,15 +756,16 @@ l'avance, schéma par schéma. Il s'insère dans la chaîne LCEL exactement comm
 | `test_constitution_rule_cannot_be_functional` | une règle de constitution classée `functional` est rejetée |
 | `test_every_graph_node_maps_to_a_speckit_step` | chaque nœud du graphe est rattaché à une des 7 étapes affichées par l'UI |
 | `test_runner_stops_at_each_checkpoint_and_reports_nodes` | `advance`/`resume` s'arrêtent à chaque point de contrôle et signalent chaque nœud |
-| `test_ollama_is_default_local_provider` | Ollama est le fournisseur par défaut, température 0, seed, contexte 16 384, pas de secours |
-| `test_ollama_structured_output_constrains_format_to_schema` | le JSON Schema Pydantic est bien transmis à Ollama (`format`) |
-| `test_provider_and_model_from_env` | Groq et le modèle Ollama restent sélectionnables par variables d'environnement |
+| `test_gemini_is_default_provider_with_fallback` | Gemini est le fournisseur par défaut (température 0, seed), avec `gemini-2.5-flash-lite` en secours |
+| `test_gemini_structured_output_constrains_generation_to_schema` | le JSON Schema Pydantic est bien transmis à Gemini (`response_json_schema`) |
+| `test_groq_still_selectable` | Groq reste sélectionnable par variable d'environnement |
+| `test_ollama_optional` | Ollama reste utilisable (s'il est installé), avec son contexte réglable et sans secours |
 | `test_ollama_models_returns_none_when_server_down` | serveur Ollama absent : pas de plantage, l'UI peut prévenir |
 | `test_streamlit_app_runs_full_workflow` | l'application Streamlit elle-même (via `AppTest`) : saisie du brief, 6 approbations, fichiers écrits |
 
 Un exemple complet de sortie réelle est fourni dans `examples/sortie-exemple/`.
 
-Commande : `pytest` (21 tests, environ 6 secondes).
+Commande : `pytest` (22 tests, environ 6 secondes).
 
 # 12. Exécution réelle et enseignements
 
@@ -798,16 +822,12 @@ de test. Formellement, l'exigence était couverte. → Option `--require-tests` 
 ```bash
 cd sdd-pipeline
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,ui]"         # ajouter ",gemini" si besoin
-cp .env.example .env               # rien à renseigner pour Ollama
+pip install -e ".[dev,ui]"         # ajouter ",ollama" pour le LLM local optionnel
+cp .env.example .env               # puis coller la clé Gemini après GOOGLE_API_KEY=
 ```
 
-Pour le modèle local (défaut), installer Ollama et télécharger le modèle une fois :
-
-```bash
-brew install ollama && brew services start ollama   # ou l'application Ollama
-ollama pull qwen3:14b
-```
+La clé Gemini se crée gratuitement sur Google AI Studio (https://aistudio.google.com/apikey), avec un compte
+Google.
 
 **Version de Python** : le projet accepte Python 3.11 à 3.13 (`requires-python = ">=3.11,<3.14"`). Avec une
 version plus récente (par exemple 3.15, installée par défaut par Homebrew sur certains Mac), une dépendance
@@ -852,7 +872,7 @@ sdd-ui          # ouvre http://localhost:8501 dans le navigateur
 4. L'onglet « Fichiers générés » montre tous les artefacts et le code du workspace ; un bouton télécharge le tout
    en `.zip`. Les fichiers sont aussi sur disque dans `out/ui/<session>/`.
 
-La barre latérale permet de choisir le fournisseur (Ollama par défaut) et le modèle ; pour Ollama, elle indique si le serveur répond et si le modèle est téléchargé. Avec Groq ou Gemini, si la clé API est absente du `.env`, elle permet de la saisir : elle reste en mémoire et n'est
+La barre latérale permet de choisir le fournisseur (Gemini par défaut) et le modèle ; pour Ollama, elle indique si le serveur répond et si le modèle est téléchargé. Avec Groq ou Gemini, si la clé API est absente du `.env`, elle permet de la saisir : elle reste en mémoire et n'est
 jamais écrite sur disque. En cas d'erreur (quota, réseau), un bouton reprend le workflow au dernier checkpoint ;
 une session peut aussi être reprise plus tard avec son identifiant.
 
@@ -871,7 +891,7 @@ sdd examples/brief.md --out out --thread <identifiant>
 | `--max-retries` | nombre de corrections automatiques par étape (3) |
 | `--require-tests` | chaque exigence fonctionnelle doit avoir une tâche qui écrit un test |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
-| `--provider` / `SDD_PROVIDER` | `ollama` (défaut), `groq`, `gemini` |
+| `--provider` / `SDD_PROVIDER` | `gemini` (défaut), `groq`, `ollama` |
 | `--model` / `SDD_MODEL` | nom du modèle |
 | `SDD_NUM_CTX` | contexte Ollama en tokens (16384) |
 | `SDD_STRUCTURED_METHOD` | `json_schema`, `function_calling`, `json_mode` |
@@ -898,7 +918,7 @@ sdd examples/brief.md --out out --thread <identifiant>
   que le plan a un point de contrôle humain.
 - Le code généré est exécuté (pytest) sur la machine : à faire tourner dans un environnement isolé (conteneur)
   pour un usage sérieux.
-- En local, un modèle de 14 milliards de paramètres est plus lent et se trompe plus souvent : plus de tours de correction. Avec Groq, les quotas gratuits limitent le nombre d'exécutions par jour.
+- Les API gratuites (Gemini, Groq) ont des quotas par minute et par jour : un gros projet peut les atteindre ; le modèle de secours et les reprises de session limitent le problème. En local (Ollama), un modèle plus petit est plus lent et se trompe plus souvent.
 - Température 0 ne garantit pas une sortie identique d'un appel à l'autre ; ce sont les règles d'acceptation qui sont déterministes.
 
 **Évolutions possibles**

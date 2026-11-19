@@ -35,26 +35,25 @@ Usage standard de LangGraph : `StateGraph`, arêtes conditionnelles, `interrupt(
 checkpointer SQLite (reprise avec `--thread`). Côté LangChain : `ChatPromptTemplate | llm.with_structured_output(...)`
 (LCEL) et `with_fallbacks` pour le modèle de secours.
 
-## Modèle : local par défaut
+## Modèle : Gemini (gratuit) par défaut
 
-Par défaut **Ollama + `qwen3:14b`**, 100 % local : gratuit, sans quota, aucune donnée envoyée à un tiers.
-La sortie structurée passe le JSON Schema à Ollama (paramètre `format`), qui contraint la génération.
-Le contexte est fixé à 16 384 tokens (`SDD_NUM_CTX`), car celui d'Ollama par défaut est trop court et
-tronquerait l'entrée sans prévenir. Alternative locale : `gpt-oss:20b` (plus lourd, ~14 Go).
+Par défaut **Google Gemini `gemini-2.5-flash`** via l'API gratuite (clé sur https://aistudio.google.com/apikey),
+avec bascule automatique sur **`gemini-2.5-flash-lite`** (même clé, quota séparé) si le quota est atteint.
+Rien ne tourne sur votre machine. La sortie structurée passe le JSON Schema à Gemini (`response_json_schema`),
+qui contraint la génération.
 
 Toujours disponibles, via la barre latérale de l'UI, `--provider`/`--model` en CLI, ou le `.env` :
-`groq` (`openai/gpt-oss-120b` + secours `openai/gpt-oss-20b`, rapide mais quota journalier) et `gemini`.
+`groq` (`openai/gpt-oss-120b`, rapide mais quota journalier) et `ollama` (LLM local, optionnel :
+`pip install -e ".[ollama]"`).
 
 ## Démarrage
 
 Python **3.11 à 3.13** (sur macOS, si `python3` est en 3.14+ : `brew install python@3.13`).
 
 ```bash
-brew install ollama && brew services start ollama   # ou l'application Ollama (ollama.com)
-ollama pull qwen3:14b                               # ~9 Go, une seule fois
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,ui]"        # + ",gemini" si besoin
-cp .env.example .env              # rien à renseigner pour Ollama
+pip install -e ".[dev,ui]"
+cp .env.example .env              # puis coller la clé Gemini après GOOGLE_API_KEY=
 ```
 
 ### Interface web locale (recommandé)
@@ -74,7 +73,7 @@ L'interface ne parle jamais au modèle elle-même : elle passe par le même grap
 ```bash
 sdd examples/brief.md --constitution examples/constitution.md --require-tests
 sdd examples/brief.md --provider groq   # changer de fournisseur ponctuellement
-pytest                            # 21 tests hors ligne avec un faux LLM
+pytest                            # 22 tests hors ligne avec un faux LLM
 ```
 
 Le code généré est exécuté par pytest : à lancer de préférence dans un environnement isolé.
