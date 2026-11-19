@@ -584,8 +584,12 @@ sdd-pipeline/
 │   ├── validators.py       tous les contrôles déterministes
 │   ├── render.py           rendu Markdown + écriture des fichiers
 │   ├── graph.py            le graphe LangGraph
-│   └── cli.py              interface en ligne de commande
-└── tests/test_pipeline.py  tests hors ligne
+│   ├── cli.py              interface en ligne de commande
+│   ├── runner.py           pilotage pas à pas du graphe (utilisé par l'UI)
+│   └── ui.py               interface web locale (Streamlit)
+└── tests/
+    ├── test_pipeline.py    tests hors ligne du pipeline
+    └── test_ui.py          tests hors ligne de l'interface
 ```
 
 ## 10.2 `models.py`
@@ -649,6 +653,34 @@ Lit les fichiers, crée le checkpointer SQLite, construit le graphe et boucle : 
 `[a]pprouver / [r]éviser / [q]uitter`, recueillir réponses et retour, puis reprendre avec
 `Command(resume=...)`. Option `--thread` pour reprendre une session.
 
+## 10.10 `runner.py`
+
+Le pont entre le graphe et l'interface web, sans dépendance à Streamlit (donc testable seul) :
+
+- `advance(graph, inp, cfg, on_update)` appelle `graph.stream(inp, cfg, stream_mode="updates")`. Ce mode de
+  streaming standard de LangGraph renvoie, nœud par nœud, la mise à jour d'état produite : l'interface peut
+  ainsi afficher « specify terminé : 6 exigences » pendant que le graphe continue. À la fin, `graph.get_state(cfg)`
+  donne le point de contrôle en attente (`snapshot.interrupts`), ou rien si le graphe est terminé.
+- `resume(graph, cfg, review)` transmet la décision humaine avec `Command(resume=review)`, exactement comme la CLI.
+- `STEPS` et `NODE_TO_STEP` rattachent chacun des 13 nœuds à l'une des 7 étapes de spec-kit (un test vérifie
+  qu'aucun nœud n'est oublié).
+
+## 10.11 `ui.py`
+
+L'interface web locale, écrite avec **Streamlit** (une bibliothèque Python qui transforme un script en page web,
+sans HTML ni JavaScript). Choix : Streamlit est le standard de fait pour les outils internes en Python, il
+s'installe en option (`.[ui]`) et ne change rien au cœur du pipeline.
+
+Fonctionnement : Streamlit ré-exécute le script à chaque clic ; ce qui doit survivre (identifiant de session,
+journal, point de contrôle en attente) est rangé dans `st.session_state`. Le graphe est construit une fois par
+session (`st.cache_resource`) avec le même checkpointer SQLite que la CLI : une session interrompue (quota,
+fermeture du navigateur) se reprend avec son identifiant.
+
+**Ce que l'interface ne fait pas** : elle n'appelle jamais le modèle elle-même et n'ajoute aucun texte. Elle
+envoie le brief et la constitution tels quels, puis les décisions humaines (`approve`, `revise` avec réponses et
+retour, `abort`), qui passent par le même modèle `Review` et deviennent des sources `A-xxx` / `F-xxx`. Tous les
+garde-fous du chapitre 7 s'appliquent donc à l'identique.
+
 # 11. Les tests
 
 Les tests (`tests/test_pipeline.py`) tournent **sans réseau et sans clé** grâce à un `FakeLLM` : un faux chat
@@ -671,10 +703,13 @@ l'avance, schéma par schéma. Il s'insère dans la chaîne LCEL exactement comm
 | `test_require_tests_option` | avec `--require-tests`, une exigence fonctionnelle sans tâche de test est signalée |
 | `test_fallback_model_used_when_primary_fails` | si le modèle principal échoue, le modèle de secours répond et la sortie est validée normalement |
 | `test_constitution_rule_cannot_be_functional` | une règle de constitution classée `functional` est rejetée |
+| `test_every_graph_node_maps_to_a_speckit_step` | chaque nœud du graphe est rattaché à une des 7 étapes affichées par l'UI |
+| `test_runner_stops_at_each_checkpoint_and_reports_nodes` | `advance`/`resume` s'arrêtent à chaque point de contrôle et signalent chaque nœud |
+| `test_streamlit_app_runs_full_workflow` | l'application Streamlit elle-même (via `AppTest`) : saisie du brief, 6 approbations, fichiers écrits |
 
 Un exemple complet de sortie réelle est fourni dans `examples/sortie-exemple/`.
 
-Commande : `pytest` (14 tests, environ 2 secondes).
+Commande : `pytest` (17 tests, environ 4 secondes).
 
 # 12. Exécution réelle et enseignements
 
@@ -730,10 +765,15 @@ de test. Formellement, l'exigence était couverte. → Option `--require-tests` 
 
 ```bash
 cd sdd-pipeline
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"            # ajouter ".[ollama]" ou ".[gemini]" si besoin
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,ui]"         # ajouter ",ollama" ou ",gemini" si besoin
 cp .env.example .env               # puis renseigner GROQ_API_KEY
 ```
+
+**Version de Python** : le projet accepte Python 3.11 à 3.13 (`requires-python = ">=3.11,<3.14"`). Avec une
+version plus récente (par exemple 3.15, installée par défaut par Homebrew sur certains Mac), une dépendance
+indirecte (`zstandard`) doit être compilée et l'installation échoue. Sur macOS : `brew install python@3.13`, puis
+créer l'environnement avec `python3.13` comme ci-dessus.
 
 La clé Groq se crée gratuitement sur la console Groq. Le fichier `.env` est exclu de git par `.gitignore` : ne
 jamais mettre la clé dans le code.
@@ -758,13 +798,32 @@ Retour libre (vide = aucun) >
 
 Ouvrez le fichier `.md` indiqué pour relire l'artefact avant de décider.
 
-## 13.3 Reprendre une session
+## 13.3 Utiliser l'interface web
+
+```bash
+sdd-ui          # ouvre http://localhost:8501 dans le navigateur
+```
+
+1. Collez votre brief (et, si vous le souhaitez, une constitution), ou cliquez sur « Charger l'exemple ».
+2. Cliquez sur « Lancer le workflow SDD » : les nœuds s'affichent au fil de l'exécution, et la barre d'étapes
+   montre où en est le workflow (constitution → … → implement).
+3. À chaque point de contrôle, l'artefact (spec, plan, analyse, code proposé, résultat des tests) est affiché.
+   Trois choix : **Approuver** ; **Réviser** en répondant aux questions ouvertes et/ou avec un retour libre ;
+   **Arrêter**.
+4. L'onglet « Fichiers générés » montre tous les artefacts et le code du workspace ; un bouton télécharge le tout
+   en `.zip`. Les fichiers sont aussi sur disque dans `out/ui/<session>/`.
+
+Si la clé API est absente du `.env`, la barre latérale permet de la saisir : elle reste en mémoire et n'est
+jamais écrite sur disque. En cas d'erreur (quota, réseau), un bouton reprend le workflow au dernier checkpoint ;
+une session peut aussi être reprise plus tard avec son identifiant.
+
+## 13.4 Reprendre une session (CLI)
 
 ```bash
 sdd examples/brief.md --out out --thread <identifiant>
 ```
 
-## 13.4 Options
+## 13.5 Options
 
 | Option / variable | Effet |
 |---|---|
@@ -776,8 +835,9 @@ sdd examples/brief.md --out out --thread <identifiant>
 | `SDD_PROVIDER` | `groq`, `ollama`, `gemini` |
 | `SDD_MODEL` | nom du modèle |
 | `SDD_STRUCTURED_METHOD` | `json_schema`, `function_calling`, `json_mode` |
+| `SDD_UI_OUT` | dossier de sortie de l'interface web (`out/ui`) |
 
-## 13.5 Écrire un bon brief
+## 13.6 Écrire un bon brief
 
 - Une idée par ligne : chaque ligne devient une source citable. Les titres (`#`) sont ignorés.
 - Écrivez les critères d'acceptation si vous en avez (« le titre est obligatoire ») : sinon le pipeline n'en inventera pas.
@@ -805,7 +865,6 @@ sdd examples/brief.md --out out --thread <identifiant>
 
 - Exécuter `verify` après chaque tâche et non seulement à la fin.
 - Un mode « spec seulement » ou « jusqu'aux tâches » pour utiliser le pipeline comme générateur de documents.
-- Une interface web (LangGraph Studio ou une petite application) pour les points de contrôle.
 - Un historique versionné des artefacts (un commit git par étape approuvée).
 - Des validateurs spécifiques au domaine (vocabulaire métier autorisé, règles de nommage).
 
