@@ -37,9 +37,10 @@ checkpointer SQLite (reprise avec `--thread`). Côté LangChain : `ChatPromptTem
 
 ## Modèle : Gemini (gratuit) par défaut
 
-Par défaut **Google Gemini `gemini-2.5-flash`** via l'API gratuite (clé sur https://aistudio.google.com/apikey),
-avec bascule automatique sur **`gemini-2.5-flash-lite`** (même clé, quota séparé) si le quota est atteint.
-Rien ne tourne sur votre machine. La sortie structurée passe le JSON Schema à Gemini (`response_json_schema`),
+Par défaut **Google Gemini `gemini-3.8-flash`** via l'API gratuite (clé sur https://aistudio.google.com/apikey).
+Rien ne tourne sur votre machine. Les modèles ouverts dépendent du compte (`gemini-2.5-flash` est fermé aux
+nouveaux comptes) : la barre latérale de l'UI liste ceux **réellement disponibles pour votre clé** et permet de
+choisir le modèle principal et un modèle de secours (même clé, quota séparé). La sortie structurée passe le JSON Schema à Gemini (`response_json_schema`),
 qui contraint la génération.
 
 Toujours disponibles, via la barre latérale de l'UI, `--provider`/`--model` en CLI, ou le `.env` :
@@ -73,7 +74,7 @@ L'interface ne parle jamais au modèle elle-même : elle passe par le même grap
 ```bash
 sdd examples/brief.md --constitution examples/constitution.md --require-tests
 sdd examples/brief.md --provider groq   # changer de fournisseur ponctuellement
-pytest                            # 22 tests hors ligne avec un faux LLM
+pytest                            # 24 tests hors ligne avec un faux LLM
 ```
 
 Le code généré est exécuté par pytest : à lancer de préférence dans un environnement isolé.

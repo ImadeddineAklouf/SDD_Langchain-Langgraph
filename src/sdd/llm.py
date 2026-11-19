@@ -13,12 +13,13 @@ import os
 
 PROVIDERS = ["gemini", "groq", "ollama"]
 DEFAULTS = {
-    "gemini": "gemini-2.5-flash",
+    "gemini": "gemini-3.8-flash",  # modèle recommandé par l'API (gemini-2.5-flash est fermé aux nouveaux comptes)
     "groq": "openai/gpt-oss-120b",
     "ollama": "qwen3:14b",
 }
 # Secours chez le même fournisseur (même clé, quota séparé) : bascule automatique si le principal échoue.
-FALLBACKS = {"gemini": "gemini-2.5-flash-lite", "groq": "openai/gpt-oss-20b"}
+# Gemini : aucun par défaut, car les modèles ouverts dépendent du compte ; à choisir dans l'UI ou le .env.
+FALLBACKS = {"groq": "openai/gpt-oss-20b"}
 API_KEYS = {"groq": "GROQ_API_KEY", "gemini": "GOOGLE_API_KEY"}
 
 
@@ -58,6 +59,58 @@ def get_llm(model: str | None = None):
         # num_ctx : le contexte par défaut d'Ollama est court ; au-delà, l'entrée serait tronquée sans erreur.
         return ChatOllama(model=model, temperature=0, seed=42, num_ctx=int(os.getenv("SDD_NUM_CTX", "16384")))
     raise ValueError(f"Fournisseur inconnu : {p}")
+
+
+def gemini_models() -> list[str] | None:
+    """Modèles Gemini utilisables avec la clé (generateContent), ou None si la liste est inaccessible."""
+    key = os.getenv("GOOGLE_API_KEY")
+    if not key:
+        return None
+    try:
+        from google import genai
+
+        models = genai.Client(api_key=key).models.list()
+        return sorted(m.name.removeprefix("models/") for m in models if "generateContent" in (m.supported_actions or []))
+    except Exception:
+        return None
+
+
+def is_api_error(exc: Exception) -> bool:
+    """Erreur du fournisseur (clé, modèle introuvable, réseau, quota épuisé) : redemander ne sert à rien.
+
+    Les exceptions standard de langchain-core (ModelError) couvrent Gemini ; les codes HTTP couvrent les autres.
+    Une sortie qui ne respecte pas le schéma (OutputParserException, ValidationError, ou un 400 de Groq)
+    n'en fait pas partie : elle est corrigée par la boucle de génération."""
+    from langchain_core.exceptions import ModelError
+
+    if isinstance(exc, ModelError):
+        return True
+    if type(exc).__name__ in ("APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout"):
+        return True
+    return getattr(exc, "status_code", None) in (401, 403, 404, 429)
+
+
+def explain_error(exc: Exception) -> str:
+    """Message clair (en français) pour une erreur du fournisseur."""
+    from langchain_core.exceptions import (
+        ModelAuthenticationError, ModelConnectionError, ModelNotFoundError, ModelPermissionDeniedError,
+        ModelRateLimitError, ModelTimeoutError,
+    )
+
+    detail = str(exc)[:400]
+    status = getattr(exc, "status_code", None)
+    if isinstance(exc, ModelNotFoundError) or status == 404:
+        return (f"Modèle introuvable pour cette clé ({model_name()}). Choisissez un autre modèle dans la barre "
+                f"latérale (ou SDD_MODEL dans .env). Détail : {detail}")
+    if isinstance(exc, (ModelAuthenticationError, ModelPermissionDeniedError)) or status in (401, 403):
+        key = API_KEYS.get(provider(), "la clé API")
+        return f"Clé API refusée : vérifiez {key} dans le fichier .env. Détail : {detail}"
+    if isinstance(exc, ModelRateLimitError) or status == 429:
+        return ("Quota gratuit du fournisseur atteint (modèle de secours compris). Attendez un peu, ou choisissez "
+                f"un autre modèle ou fournisseur dans la barre latérale. Détail : {detail}")
+    if isinstance(exc, (ModelConnectionError, ModelTimeoutError)) or "Connect" in type(exc).__name__:
+        return f"Connexion au fournisseur impossible : vérifiez votre connexion Internet. Détail : {detail}"
+    return f"Erreur du fournisseur : {detail}"
 
 
 def ollama_models() -> list[str] | None:

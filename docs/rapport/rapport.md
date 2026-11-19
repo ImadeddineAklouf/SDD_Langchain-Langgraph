@@ -125,7 +125,7 @@ Google, Ollama…) exposent la même interface : `invoke(messages)` renvoie un m
 
 ```python
 from langchain_google_genai import ChatGoogleGenerativeAI
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, seed=42, max_retries=6)
+llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", temperature=0, seed=42, max_retries=6)
 ```
 
 Changer de fournisseur revient à changer de classe (`ChatGroq`, `ChatOllama`) : le reste du code
@@ -579,10 +579,13 @@ L'essai d'Ollama a buté sur l'installation : sur le Mac de l'utilisateur, le se
 (`brew services` en erreur), et faire tourner un modèle de 9 Go en local n'était de toute façon pas souhaité.
 Le fournisseur par défaut est donc devenu **Google Gemini**, via son API gratuite :
 
-- **Modèle principal : `gemini-2.5-flash`**, rapide, bon en sortie structurée, avec un très grand contexte (plus
-  d'un million de tokens) : l'étape `implement` peut recevoir tout le code déjà écrit sans troncature.
-- **Secours : `gemini-2.5-flash-lite`**, branché avec `with_fallbacks` comme pour Groq. Même clé API, mais quota
-  séparé : quand le quota du modèle principal est atteint, le pipeline continue sur le secours.
+- **Modèle principal : `gemini-3.8-flash`**. Le premier choix, `gemini-2.5-flash`, a été refusé dès le premier
+  essai réel : l'API a répondu « 404 NOT_FOUND : ce modèle n'est plus disponible pour les nouveaux utilisateurs »
+  et recommandait `gemini-3.8-flash`. Même leçon qu'avec Groq (12.2) : les modèles gratuits changent vite.
+- **Liste réelle des modèles** : la barre latérale de l'UI interroge l'API (`models.list()`) avec la clé de
+  l'utilisateur et ne propose que les modèles ouverts pour ce compte. Le modèle principal et le **modèle de
+  secours** (branché avec `with_fallbacks`, même clé, quota séparé) se choisissent dans cette liste. Il n'y a
+  pas de secours par défaut, puisque les modèles ouverts varient d'un compte à l'autre.
 - **Sortie structurée** : avec `method="json_schema"`, `ChatGoogleGenerativeAI.with_structured_output` envoie
   `response_mime_type="application/json"` et le JSON Schema Pydantic dans `response_json_schema`. Gemini génère
   alors uniquement du JSON conforme. Un test le vérifie
@@ -599,7 +602,7 @@ Groq et Ollama restent sélectionnables sans changer de code (barre latérale de
 
 | `SDD_PROVIDER` | Modèle par défaut | Secours | Avantages | Inconvénients |
 |---|---|---|---|---|
-| `gemini` (défaut) | `gemini-2.5-flash` | `gemini-2.5-flash-lite` | gratuit, rien à installer, très grand contexte | quotas par minute et par jour, données du tier gratuit utilisables par Google |
+| `gemini` (défaut) | `gemini-3.8-flash` | au choix dans l'UI | gratuit, rien à installer, très grand contexte | quotas par minute et par jour, données du tier gratuit utilisables par Google |
 | `groq` | `openai/gpt-oss-120b` | `openai/gpt-oss-20b` | gratuit, très rapide, gros modèle | quota journalier vite atteint |
 | `ollama` (optionnel) | `qwen3:14b` | aucun | 100 % local, privé, sans quota | à installer, lent, modèle plus petit |
 
@@ -756,7 +759,9 @@ l'avance, schéma par schéma. Il s'insère dans la chaîne LCEL exactement comm
 | `test_constitution_rule_cannot_be_functional` | une règle de constitution classée `functional` est rejetée |
 | `test_every_graph_node_maps_to_a_speckit_step` | chaque nœud du graphe est rattaché à une des 7 étapes affichées par l'UI |
 | `test_runner_stops_at_each_checkpoint_and_reports_nodes` | `advance`/`resume` s'arrêtent à chaque point de contrôle et signalent chaque nœud |
-| `test_gemini_is_default_provider_with_fallback` | Gemini est le fournisseur par défaut (température 0, seed), avec `gemini-2.5-flash-lite` en secours |
+| `test_gemini_is_default_provider` | Gemini est le fournisseur par défaut (température 0, seed) ; le secours se règle par `SDD_FALLBACK_MODEL` |
+| `test_api_errors_are_explained_not_reported_as_schema_errors` | clé refusée, modèle introuvable, quota : message clair ; une sortie hors schéma reste corrigée par la boucle |
+| `test_generate_stops_immediately_on_api_error` | une erreur du fournisseur arrête l'étape tout de suite (pas de relances inutiles) |
 | `test_gemini_structured_output_constrains_generation_to_schema` | le JSON Schema Pydantic est bien transmis à Gemini (`response_json_schema`) |
 | `test_groq_still_selectable` | Groq reste sélectionnable par variable d'environnement |
 | `test_ollama_optional` | Ollama reste utilisable (s'il est installé), avec son contexte réglable et sans secours |
@@ -765,7 +770,7 @@ l'avance, schéma par schéma. Il s'insère dans la chaîne LCEL exactement comm
 
 Un exemple complet de sortie réelle est fourni dans `examples/sortie-exemple/`.
 
-Commande : `pytest` (22 tests, environ 6 secondes).
+Commande : `pytest` (24 tests, environ 6 secondes).
 
 # 12. Exécution réelle et enseignements
 
@@ -814,6 +819,15 @@ moins un test pytest », le modèle a créé une tâche « configurer pytest » 
 de test. Formellement, l'exigence était couverte. → Option `--require-tests` et règle déterministe associée
 (chapitre 6.5). Leçon : une règle que l'on veut garantie doit être **vérifiée par du code**, pas seulement
 écrite dans un prompt.
+
+**Erreur du fournisseur affichée comme une erreur de schéma.** Lors du premier essai avec Gemini, le modèle
+demandé n'existait plus pour le compte (404). Le message affiché était « Sortie non conforme au schéma », et la
+boucle de correction relançait trois fois un appel voué à l'échec : `generate()` attrapait toutes les
+exceptions. → `generate()` distingue désormais les **erreurs du fournisseur** (clé refusée, modèle introuvable,
+réseau, quota épuisé), reconnues par les exceptions standard de `langchain-core` (`ModelNotFoundError`,
+`ModelAuthenticationError`, etc.) ou par le code HTTP : elles arrêtent l'étape immédiatement, et l'interface
+affiche un message clair (`explain_error`) en conservant la session, qui reprend au dernier checkpoint une fois
+le problème corrigé. Seules les sorties hors schéma passent encore par la boucle de correction.
 
 # 13. Installation et utilisation
 
