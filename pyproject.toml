@@ -7,15 +7,15 @@ dependencies = [
   "langgraph>=1.0",
   "langgraph-checkpoint-sqlite>=2.0",
   "langchain-core>=1.0",
-  "langchain-ollama>=1.0",
+  "langchain-google-genai>=3.0",
   "langchain-groq>=1.0",
   "pydantic>=2.7",
   "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-ollama = []  # Ollama est désormais inclus par défaut ; extra conservé pour compatibilité
-gemini = ["langchain-google-genai>=3.0"]
+ollama = ["langchain-ollama>=1.0"]  # LLM local, optionnel
+gemini = []  # Gemini est inclus par défaut ; extra conservé pour compatibilité
 ui = ["streamlit>=1.40"]
 dev = ["pytest>=8"]
 
