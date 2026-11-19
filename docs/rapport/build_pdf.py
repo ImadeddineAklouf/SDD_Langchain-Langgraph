@@ -7,7 +7,7 @@ ROOT = HERE.parents[1]
 FILES = ["pyproject.toml", ".env.example", ".gitignore", "examples/constitution.md", "examples/brief.md",
          "src/sdd/models.py", "src/sdd/ingest.py", "src/sdd/prompts.py", "src/sdd/llm.py",
          "src/sdd/validators.py", "src/sdd/render.py", "src/sdd/graph.py", "src/sdd/cli.py", "src/sdd/runner.py", "src/sdd/ui.py",
-         "tests/test_pipeline.py", "tests/test_ui.py"]
+         "tests/test_pipeline.py", "tests/test_ui.py", "tests/test_llm.py"]
 LANG = {".py": "python", ".toml": "toml", ".md": "markdown"}
 
 md = (HERE / "rapport.md").read_text(encoding="utf-8")

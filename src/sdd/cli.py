@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 from langgraph.types import Command
 
 from .graph import build_graph
-from .llm import get_fallback_llm, get_llm
+from .llm import PROVIDERS, get_fallback_llm, get_llm
 
 
 def _ask_review(payload: dict) -> dict:
@@ -57,7 +58,16 @@ def main() -> None:
     ap.add_argument("--thread", default=None, help="Reprendre une session existante")
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--require-tests", action="store_true", help="Chaque exigence fonctionnelle doit avoir une tâche de test")
+    ap.add_argument("--provider", choices=PROVIDERS, default=None, help="Fournisseur (sinon SDD_PROVIDER, défaut ollama)")
+    ap.add_argument("--model", default=None, help="Modèle (sinon SDD_MODEL, défaut selon le fournisseur)")
     args = ap.parse_args()
+    if args.provider:
+        os.environ["SDD_PROVIDER"] = args.provider
+        if not args.model:  # le modèle et le secours du .env visaient peut-être un autre fournisseur
+            os.environ.pop("SDD_MODEL", None)
+            os.environ.pop("SDD_FALLBACK_MODEL", None)
+    if args.model:
+        os.environ["SDD_MODEL"] = args.model
 
     from langgraph.checkpoint.sqlite import SqliteSaver
 
