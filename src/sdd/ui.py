@@ -28,7 +28,8 @@ def launch() -> None:
     from streamlit.web import cli as stcli
 
     sys.argv = ["streamlit", "run", str(Path(__file__).resolve()), "--browser.gatherUsageStats=false",
-                "--client.toolbarMode=minimal", *sys.argv[1:]]
+                "--client.toolbarMode=minimal",
+                "--runner.magicEnabled=false", *sys.argv[1:]]
     sys.exit(stcli.main())
 
 
@@ -195,7 +196,10 @@ def render() -> None:
                 with st.expander(path, expanded=True):
                     st.code(content, language="python" if path.endswith(".py") else None)
         if "passed" in p:
-            (st.success if p["passed"] else st.error)("Tests : OK" if p["passed"] else "Tests : échec")
+            if p["passed"]:
+                st.success("Tests : OK")
+            else:
+                st.error("Tests : échec")
         for e in p.get("errors", []):
             st.error(e)
         for w in p.get("warnings", []):
@@ -247,7 +251,10 @@ def render() -> None:
     for tab, name in zip(tabs, present):
         with tab:
             txt = (out / name).read_text(encoding="utf-8")
-            st.json(json.loads(txt), expanded=False) if name.endswith(".json") else st.markdown(txt)
+            if name.endswith(".json"):
+                st.json(json.loads(txt), expanded=False)
+            else:
+                st.markdown(txt)
     if code:
         with tabs[-1]:
             f = st.selectbox("Fichier", code)

@@ -53,17 +53,13 @@ def test_streamlit_app_runs_full_workflow(tmp_path, monkeypatch):
     import sdd.llm
     import sdd.ui
 
-    monkeypatch.setattr(sdd.ui, "ROOT_OUT", tmp_path)
+    monkeypatch.setenv("SDD_UI_OUT", str(tmp_path))
     monkeypatch.setattr(sdd.llm, "get_llm", lambda *a, **k: scripted_llm())
     monkeypatch.setattr(sdd.llm, "get_fallback_llm", lambda: None)
     monkeypatch.setenv("GROQ_API_KEY", "test")
 
-    def app():
-        from sdd.ui import render
-
-        render()
-
-    at = AppTest.from_function(app, default_timeout=30).run()
+    # from_file : ui.py est exécuté comme script principal, exactement comme avec `streamlit run`
+    at = AppTest.from_file(sdd.ui.__file__, default_timeout=30).run()
     assert not at.exception
     at.text_area[0].set_value(BRIEF)
     at.text_area[1].set_value(CONSTITUTION)
@@ -77,5 +73,6 @@ def test_streamlit_app_runs_full_workflow(tmp_path, monkeypatch):
         next(b for b in at.button if "Approuver" in b.label).click().run()
     assert stages == ["Clarify", "Plan", "Analyze", "Implement", "Implement", "Verify"]
     assert any("Workflow terminé" in s.value for s in at.success)
+    assert not at.get("help_info"), "un objet Streamlit est affiché par la « magic » (doc DeltaGenerator)"
     thread = next(Path(tmp_path).iterdir())
     assert (thread / "workspace/todo/cli.py").read_text() == "# cli\n"
