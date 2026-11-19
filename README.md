@@ -7,7 +7,29 @@ Le LLM **transforme** les entrées mais n'a jamais le droit d'**inventer**.
 📘 Le rapport complet (concepts, architecture, code, choix, exécution réelle) est dans
 [`docs/rapport-sdd-pipeline.pdf`](docs/rapport-sdd-pipeline.pdf).
 
-## Principe : le LLM propose, du code déterministe dispose
+## Architecture « AI factory » : un producteur, un Gardien
+
+D'un côté, le **graphe SDD** produit (spec, plan, tâches, code). De l'autre, le **Gardien**, un graphe LangGraph
+compilé à part, vérifie après **chaque** étape la cohérence brief ↔ spec ↔ plan ↔ tâches ↔ code. Au moindre
+problème, il lève une alerte et **met le workflow en pause** (`interrupt()` + checkpointer) jusqu'à la décision
+humaine : **répondre** (sources `A-xxx`), **corriger** (sources `F-xxx`), **accepter le risque** (justification
+obligatoire), **continuer** (avertissements seulement) ou **arrêter**. Le workflow reprend ensuite **au bon nœud**
+(celui qui a produit l'erreur), et chaque contrôle et chaque décision sont écrits dans un **journal d'audit**.
+
+| Gravité | Effet | Exemples |
+|---|---|---|
+| ⛔ bloquante | pause obligatoire | question ouverte, réponse humaine ignorée, citation inventée, exigence sans tâche, fichier de données ou dépendance qu'aucune source ne demande, tests en échec |
+| ⚠️ avertissement | pause, l'humain acquitte | nom de fichier choisi par l'IA (format demandé, nom non), élément de plan sans tâche, constat sémantique mineur |
+| ℹ️ info | tracé, sans pause | modules de la bibliothèque standard utilisés, fichier partagé entre tâches, risque déjà accepté |
+
+- **Déterministe d'abord** (`guardian.py`) : le gros des contrôles est du code pur. Le Gardien ne fait pas confiance
+  aux erreurs rapportées par le producteur : il revalide tout à partir des artefacts.
+- **Sémantique ensuite** (LLM, facultatif, idéalement un autre modèle) : contradiction, déformation, hors périmètre.
+  Il ne peut **qu'ajouter** des alertes ; un constat qui cite un id inexistant est écarté.
+- **Plus d'implémentation tant qu'une question reste ouverte**, et une question sans réponse ne disparaît jamais d'elle-même.
+- **Mode usine** (défaut) : pause uniquement sur alerte. **Mode supervisé** : pause aussi à chaque étape.
+
+## Garde-fous du producteur : le LLM propose, du code déterministe dispose
 
 | Garde-fou | Où | Ce qu'il empêche |
 |---|---|---|
@@ -15,25 +37,25 @@ Le LLM **transforme** les entrées mais n'a jamais le droit d'**inventer**.
 | Sortie structurée `json_schema` + Pydantic `extra="forbid"`, température 0 | `llm.py`, `models.py` | champs inventés, texte libre |
 | Citation **mot pour mot** obligatoire pour chaque exigence | `validate_spec` | exigences sans origine |
 | **Ancrage lexical** (≥ 70 % des mots porteurs présents dans les sources) | `grounding_ratio` | ajouts (« priorité », « OAuth »…) |
-| Chaque phrase du brief → exigence **ou** question ouverte | `validate_spec` | oublis silencieux |
-| `clarify` ne produit que des questions ; les réponses humaines deviennent des sources `A-xxx` | `clarify`, `_add_human_input` | suppositions |
+| Chaque phrase du brief → exigence **ou** question ; chaque réponse `A-xxx` → citée par une exigence | `validate_spec` | oublis silencieux, réponses perdues |
+| `clarify` ne produit que des questions ; les réponses humaines deviennent des sources `A-xxx` | `clarify`, `gate` | suppositions |
 | Choix techno uniquement s'ils sont **nommés** dans une source | `validate_plan` | stack inventée |
 | Tâches liées à exigence + plan, critères d'acceptation **copiés** | `validate_tasks` | tâches « bonus » |
-| `analyze` : contrôle croisé spec ↔ plan ↔ tâches **sans LLM** | `validators.analyze` | incohérences |
-| L'implémentation ne touche **que** les fichiers déclarés ; contrôle syntaxique | `validate_implementation` | effets de bord, code cassé |
+| L'implémentation ne touche **que** les fichiers déclarés ; écrite seulement après le feu vert du Gardien | `validate_implementation`, `apply_impl` | effets de bord |
 | `verify` lance pytest ; `fix` n'a pas le droit de modifier les tests | `run_tests`, `validate_fix` | « triche » sur les tests |
-| Boucles de correction bornées, points de contrôle humains (`interrupt`) | `graph.py` | décisions sans l'humain |
 
 ## Graphe LangGraph
 
 ```
-START → constitution → specify → clarify → review_spec ⏸ → plan → review_plan ⏸ → tasks → analyze ⏸
-      → implement → review_impl ⏸ (une tâche à la fois) → verify ⇄ fix → review_verify ⏸ → END
+START → constitution → specify → clarify ─► guardian ─(alerte)─► gate ⏸ ─► reprise au bon nœud
+                                   plan ─► guardian ─(ok)─► tasks → analyze ─► guardian ─► implement ─► guardian
+                                   ─► apply_impl ─► (tâche suivante | verify ⇄ fix) ─► guardian ─► END
 ```
 
-Usage standard de LangGraph : `StateGraph`, arêtes conditionnelles, `interrupt()` + `Command(resume=…)`,
-checkpointer SQLite (reprise avec `--thread`). Côté LangChain : `ChatPromptTemplate | llm.with_structured_output(...)`
-(LCEL) et `with_fallbacks` pour le modèle de secours.
+Usage standard de LangGraph : `StateGraph`, arêtes conditionnelles, sous-graphe (le Gardien), réducteur
+(`Annotated[list, operator.add]` pour le journal d'audit), `interrupt()` + `Command(resume=…)`, checkpointer SQLite
+(reprise avec `--thread`). Côté LangChain : `ChatPromptTemplate | llm.with_structured_output(...)` (LCEL) et
+`with_fallbacks` pour le modèle de secours.
 
 ## Modèle : Gemini (gratuit) par défaut
 
@@ -63,9 +85,10 @@ cp .env.example .env              # puis coller la clé Gemini après GOOGLE_API
 sdd-ui                            # ouvre http://localhost:8501
 ```
 
-Collez un brief (et une constitution facultative), lancez : chaque étape s'affiche au fil de l'eau, et à chaque
-point de contrôle (clarify, plan, analyze, implement, verify) vous **approuvez**, **révisez** (réponses aux
-questions + retour libre, qui deviennent des sources citables) ou **arrêtez**. Les artefacts et le code générés
+Collez un brief (et une constitution facultative), lancez : chaque étape s'affiche au fil de l'eau. Quand le
+Gardien lève une alerte, la **boîte d'alertes** affiche le détail (code, gravité, ids concernés, étape de reprise)
+et vous **répondez**, **corrigez**, **acceptez le risque** (avec justification), **continuez** ou **arrêtez**.
+La barre latérale règle le Gardien (mode usine / supervisé, contrôle sémantique, modèle du Gardien). Les artefacts et le code générés
 sont visibles dans l'onglet « Fichiers générés », téléchargeables en zip, et écrits dans `out/ui/<session>/`.
 L'interface ne parle jamais au modèle elle-même : elle passe par le même graphe et les mêmes validateurs que la CLI.
 
@@ -73,8 +96,10 @@ L'interface ne parle jamais au modèle elle-même : elle passe par le même grap
 
 ```bash
 sdd examples/brief.md --constitution examples/constitution.md --require-tests
+sdd examples/brief.md --supervised      # pause à chaque étape, pas seulement sur alerte
+sdd examples/brief.md --no-semantic     # Gardien 100 % déterministe (aucun appel LLM de contrôle)
 sdd examples/brief.md --provider groq   # changer de fournisseur ponctuellement
-pytest                            # 24 tests hors ligne avec un faux LLM
+python -m pytest                  # 42 tests hors ligne avec un faux LLM (dont les briefs piégés du Gardien)
 ```
 
 Le code généré est exécuté par pytest : à lancer de préférence dans un environnement isolé.

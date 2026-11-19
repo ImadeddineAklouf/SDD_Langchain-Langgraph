@@ -1,46 +1,64 @@
-"""Graphe LangGraph du workflow SDD.
+"""Graphe LangGraph du workflow SDD, surveillé par le Gardien (architecture « AI factory »).
 
-Étapes alignées sur GitHub spec-kit :
-constitution -> specify -> clarify -> review_spec* -> plan -> review_plan* -> tasks -> analyze*
-             -> implement -> review_impl* -> (implement ...) -> verify -> (fix -> verify)... -> review_verify* -> END
-(* = point de contrôle humain via interrupt())
+Côté production, les étapes de GitHub spec-kit :
+    constitution -> specify -> clarify -> plan -> tasks -> analyze -> implement (une tâche à la fois) -> verify ⇄ fix
 
-Chaque nœud de génération = appel LLM (température 0, sortie structurée par JSON Schema)
-+ validation déterministe + boucle de correction bornée.
-Chaque nœud review_* = interrupt() : l'humain approuve, corrige ou répond aux questions.
-Tout ce que dit l'humain devient une nouvelle source citable (A-xxx / F-xxx).
+Côté contrôle, après CHAQUE étape productrice, le nœud `guardian` exécute le graphe du Gardien
+(compilé séparément, voir guardian.py) sur les artefacts produits :
+
+    clarify ─┐   plan ─┐   analyze ─┐   implement ─┐   verify ─┐
+             ▼         ▼            ▼              ▼           ▼
+          guardian ──(alerte ?)──► gate ⏸ interrupt() ──► décision humaine ──► reprise au bon nœud
+             │ (rien à signaler)
+             ▼
+          étape suivante
+
+Le nœud `gate` est le seul point de pause : il met le workflow en pause avec interrupt() (état sauvegardé
+par le checkpointer) et attend la décision humaine : répondre (sources A-xxx), corriger (sources F-xxx),
+accepter le risque (justification obligatoire), continuer (avertissements seulement) ou arrêter.
+Chaque contrôle et chaque décision sont ajoutés au journal d'audit (`audit`).
 """
 from __future__ import annotations
 
 import json
+import operator
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, TypedDict
+from typing import Annotated, Any, Callable, Iterable, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from . import prompts, render
+from .guardian import build_guardian, check_decision, redo_node
 from .ingest import split_statements
-from .llm import is_api_error, structured_method
-from .models import Clarifications, Implementation, Plan, Review, SourceStatement, Spec, TaskList
+from .llm import generate
+from .models import Clarifications, GateDecision, Implementation, Plan, SourceStatement, Spec, TaskList
 from .validators import (
+    _norm,
     analyze,
-    validate_clarify,
     fixable_files,
     is_test_file,
     topological_order,
+    validate_clarify,
     validate_fix,
     validate_implementation,
     validate_plan,
     validate_spec,
     validate_tasks,
 )
+
+__all__ = ["build_graph", "generate", "run_tests", "SUPERVISED"]
+
+# Mode supervisé : pause aussi à la fin de chaque étape, même sans alerte du Gardien.
+SUPERVISED = ("spec", "plan", "analyze", "impl", "verify")
+# Étape suivante quand le Gardien laisse passer (ou que l'humain accepte / acquitte).
+NEXT = {"spec": "plan", "plan": "tasks", "analyze": "implement", "impl": "apply_impl", "verify": END}
+STAGE_FILE = {"spec": "spec.md", "plan": "plan.md", "analyze": "analyze.md", "impl": "alerts.md", "verify": "verify.md"}
 
 
 class SDDState(TypedDict, total=False):
@@ -63,6 +81,14 @@ class SDDState(TypedDict, total=False):
     fix_attempts: int
     decision: str
     written: list[str]
+    # --- Gardien ---
+    stage: str                 # dernière étape produite, contrôlée par le Gardien
+    alerts: list[dict]         # rapport du dernier contrôle
+    accepted: list[str]        # empreintes des alertes acceptées / acquittées par l'humain
+    answered: list[str]        # questions déjà répondues (texte normalisé) : jamais reposées
+    redo: str                  # nœud à relancer après une réponse ou une correction
+    gate_error: str | None     # décision humaine refusée (ex. accepter un risque sans justification)
+    audit: Annotated[list[dict], operator.add]  # journal d'audit (réducteur : on ajoute, on n'efface jamais)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,58 +104,22 @@ def _dump(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1)
 
 
-def generate(llm, schema, system: str, payload: str, validate: Callable[[Any], list[str]], max_retries: int, fallback_llm=None):
-    """Appel LLM structuré + validation + correction bornée.
-
-    Ne lève pas si l'objet reste invalide : renvoie le dernier objet et ses erreurs
-    pour que l'humain tranche au point de contrôle suivant.
-    """
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", system), ("human", "{input}"), MessagesPlaceholder("corrections", optional=True)]
-    )
-    model = llm.with_structured_output(schema, method=structured_method())
-    if fallback_llm is not None:  # mécanisme standard LangChain : bascule si le modèle principal échoue
-        model = model.with_fallbacks([fallback_llm.with_structured_output(schema, method=structured_method())])
-    chain = prompt | model  # LCEL
-    corrections: list = []
-    obj, errors = None, ["Aucune sortie."]
-    for _ in range(max_retries + 1):
-        try:
-            out = chain.invoke({"input": payload, "corrections": corrections})
-            obj = out if isinstance(out, schema) else schema.model_validate(out)
-            errors = validate(obj)
-        except Exception as exc:
-            if is_api_error(exc):  # clé, modèle introuvable, réseau, quota : inutile de redemander
-                raise
-            errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
-        if not errors:
-            return obj, []
-        if obj is not None:
-            corrections.append(AIMessage(obj.model_dump_json()))
-        corrections.append(
-            HumanMessage(
-                "Ta réponse est rejetée par le validateur :\n- "
-                + "\n- ".join(errors)
-                + "\nCorrige UNIQUEMENT ces points, sans rien ajouter d'autre."
-            )
-        )
-    if obj is None:
-        raise RuntimeError("Le modèle n'a produit aucune sortie valide : " + "; ".join(errors))
-    return obj, errors
-
-
-def _add_human_input(state: SDDState, review: Review, open_questions: list[dict]) -> list[dict]:
-    """Transforme réponses/feedback humains en sources citables."""
+def _add_human_input(state: SDDState, answers: dict[str, str], feedback: str, open_questions: list[dict]) -> list[dict]:
+    """Transforme réponses/retours humains en sources citables (A-xxx / F-xxx)."""
     sources = list(state["sources"])
     qtext = {q["id"]: q["question"] for q in open_questions}
     n_a = sum(1 for s in sources if s["origin"] == "answer") + 1
-    for qid, answer in sorted(review.answers.items()):
+    for qid, answer in sorted(answers.items()):
         sources.append({"id": f"A-{n_a:03d}", "text": f"{qtext.get(qid, qid)} Réponse : {answer}", "origin": "answer"})
         n_a += 1
-    if review.feedback.strip():
+    if feedback.strip():
         n_f = sum(1 for s in sources if s["origin"] == "feedback") + 1
-        sources += [s.model_dump() for s in split_statements(review.feedback, "F", "feedback", start=n_f)]
+        sources += [s.model_dump() for s in split_statements(feedback, "F", "feedback", start=n_f)]
     return sources
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _read_workspace(ws: Path) -> dict[str, str]:
@@ -165,15 +155,25 @@ def run_tests(ws: Path, timeout: int = 120) -> dict:
 def build_graph(
     llm, out_dir: str | Path = "out", max_retries: int = 3, checkpointer=None,
     max_fix_attempts: int = 3, require_tests: bool = False, fallback_llm=None,
+    guardian_llm=None, checkpoints: Iterable[str] = (),
 ):
+    """Construit le graphe SDD surveillé par le Gardien.
+
+    guardian_llm : LLM du contrôle sémantique du Gardien (None = contrôles déterministes seuls).
+    checkpoints  : étapes où l'on fait une pause même sans alerte (SUPERVISED = toutes) ;
+                   vide = mode « usine » : pause uniquement quand le Gardien lève une alerte.
+    """
     out = Path(out_dir)
     ws = out / "workspace"
+    checkpoints = set(checkpoints)
     gen = partial(generate, fallback_llm=fallback_llm)  # tous les nœuds partagent le même modèle de secours
+    guardian_graph = build_guardian(guardian_llm, max_retries=1, require_tests=require_tests)
 
     # ---------------- 1. constitution (déterministe, sans LLM) ----------------
     def constitution(state: SDDState):
         srcs = split_statements(state.get("constitution", ""), "C", "constitution")
-        return {"sources": [s.model_dump() for s in srcs], "current": 0, "written": [], "fix_attempts": 0}
+        return {"sources": [s.model_dump() for s in srcs], "current": 0, "written": [], "fix_attempts": 0,
+                "accepted": [], "answered": []}
 
     # ---------------- 2. specify ----------------
     def specify(state: SDDState):
@@ -190,40 +190,41 @@ def build_graph(
         )
         return {**update, "spec": spec.model_dump(), "spec_errors": errs}
 
-    # ---------------- 3. clarify (LLM : questions seulement, puis humain) ----------------
+    # ---------------- 3. clarify (LLM : questions seulement ; les réponses viennent de l'humain) ----------------
     def clarify(state: SDDState):
         sources = _sources(state)
         payload = f"SOURCES :\n{_fmt_sources(state)}\n\nSPEC :\n{_dump(state['spec'])}"
         c, _errs = gen(llm, Clarifications, prompts.CLARIFY, payload, lambda x: validate_clarify(x, sources), max_retries)
-        # questions de la spec + questions de clarification, renumérotées de façon stable
-        merged, seen = [], set()
-        for q in state["spec"].get("open_questions", []) + [q.model_dump() for q in c.questions]:
-            key = q["question"].strip().lower()
+        # questions encore ouvertes du tour précédent + questions de la spec + questions de clarification,
+        # renumérotées de façon stable. Règles déterministes : une question déjà répondue n'est jamais
+        # reposée, et une question sans réponse ne disparaît jamais d'elle-même (seule une réponse ou une
+        # acceptation de risque explicite la fait sortir du chemin).
+        previous = state.get("clarifications") or []
+        merged, seen = [], set(state.get("answered", []))
+        for q in previous + state["spec"].get("open_questions", []) + [q.model_dump() for q in c.questions]:
+            key = _norm(q["question"])
             if key not in seen:
                 seen.add(key)
                 merged.append({**q, "id": f"Q-{len(merged) + 1:03d}"})
-        return {"clarifications": merged}
-
-    # interrupt() rejoue le nœud entier à la reprise : on le garde dans un nœud sans appel LLM.
-    def review_spec(state: SDDState):
-        merged = state["clarifications"]
-        render.write(out, "spec.md", render.spec_md(state, merged))
+        view = {**state, "clarifications": merged}
+        render.write(out, "spec.md", render.spec_md(view, merged))
         render.write(out, "spec.json", _dump(state["spec"]))
-        raw = interrupt(
-            {"stage": "clarify", "file": str(out / "spec.md"), "errors": state.get("spec_errors", []), "open_questions": merged}
-        )
-        rv = Review.model_validate(raw)
-        update: dict[str, Any] = {"decision": rv.action}
-        if rv.action == "revise":
-            update["sources"] = _add_human_input(state, rv, merged)
-        return update
+        return {"clarifications": merged, "stage": "spec"}
 
     # ---------------- 4. plan ----------------
     def plan(state: SDDState):
         sources, spec = _sources(state), Spec.model_validate(state["spec"])
         payload = f"SOURCES :\n{_fmt_sources(state)}\n\nSPEC :\n{_dump(state['spec'])}"
         p, errs = gen(llm, Plan, prompts.PLAN, payload, lambda x: validate_plan(x, spec, sources), max_retries)
-        return {"plan": p.model_dump(), "plan_errors": errs}
+        p = p.model_dump()
+        answered = set(state.get("answered", []))
+        # questions du plan : préfixe QP- pour ne pas se confondre avec celles de la spec
+        p["open_questions"] = [{**q, "id": f"QP-{i:03d}"} for i, q in enumerate(
+            (q for q in p["open_questions"] if _norm(q["question"]) not in answered), 1)]
+        view = {**state, "plan": p, "plan_errors": errs}
+        render.write(out, "plan.md", render.plan_md(view))
+        render.write(out, "plan.json", _dump(p))
+        return {"plan": p, "plan_errors": errs, "stage": "plan"}
 
     # ---------------- 5. tasks ----------------
     def tasks(state: SDDState):
@@ -242,12 +243,7 @@ def build_graph(
         render.write(out, "tasks.md", render.tasks_md(state))
         render.write(out, "tasks.json", _dump(state["tasks"]))
         render.write(out, "analyze.md", render.analyze_md(state, res))
-        raw = interrupt({"stage": "analyze", "file": str(out / "analyze.md"), "errors": res["errors"], "warnings": res["warnings"]})
-        rv = Review.model_validate(raw)
-        update: dict[str, Any] = {"decision": rv.action, "analysis": res}
-        if rv.action == "revise":
-            update["sources"] = _add_human_input(state, rv, [])
-        return update
+        return {"analysis": res, "stage": "analyze"}
 
     # ---------------- 7. implement (une tâche à la fois) ----------------
     def implement(state: SDDState):
@@ -256,25 +252,34 @@ def build_graph(
         task = next(t for t in tl.tasks if t.id == tid)
         reqs = [r for r in state["spec"]["requirements"] if r["id"] in task.requirement_ids]
         items = [i for i in state["plan"]["items"] if i["id"] in task.plan_item_ids]
-        feedback = [s for s in state["sources"] if s["origin"] == "feedback"]
+        human = [s for s in state["sources"] if s["origin"] in ("feedback", "answer")]
         payload = (
             f"TÂCHE :\n{task.model_dump_json(indent=1)}\n\nEXIGENCES :\n{_dump(reqs)}\n\n"
             f"ÉLÉMENTS DU PLAN :\n{_dump(items)}\n\n"
             f"CHOIX TECHNIQUES :\n{_dump(state['plan'].get('tech_choices', []))}\n\n"
             f"FICHIERS DU PROJET (déjà écrits) :\n{_dump(_read_workspace(ws))}\n\n"
-            f"RETOURS HUMAINS :\n{_dump(feedback)}"
+            f"RÉPONSES ET RETOURS HUMAINS :\n{_dump(human)}"
         )
         impl, errs = gen(
             llm, Implementation, prompts.IMPLEMENT, payload,
             lambda x: validate_implementation(x, tl, tid), max_retries,
         )
-        return {"impl": impl.model_dump(), "impl_errors": errs}
+        return {"impl": impl.model_dump(), "impl_errors": errs, "stage": "impl"}
+
+    # Les fichiers ne sont écrits qu'APRÈS le feu vert du Gardien (ou de l'humain).
+    def apply_impl(state: SDDState):
+        written = list(state.get("written", []))
+        for f in state["impl"]["files"]:
+            render.write(ws, f["path"], f["content"])
+            if f["path"] not in written:
+                written.append(f["path"])
+        return {"written": written, "current": state["current"] + 1}
 
     # ---------------- 7b. verify (déterministe) + fix (LLM) ----------------
     def verify(state: SDDState):
         res = run_tests(ws)
         render.write(out, "verify.md", f"# Vérification\n\nRésultat : {'✅ OK' if res['passed'] else '❌ échec'}\n\n```\n{res['output']}\n```\n")
-        return {"verify": res}
+        return {"verify": res, "stage": "verify"}
 
     def fix(state: SDDState):
         tl = TaskList.model_validate(state["tasks"])
@@ -295,108 +300,126 @@ def build_graph(
                     written.append(f.path)
         return {"fix_attempts": state.get("fix_attempts", 0) + 1, "written": written}
 
-    # ---------------- revues humaines ----------------
-    def make_review(stage: str, renderer: Callable[[SDDState], str]):
-        def review(state: SDDState):
-            render.write(out, f"{stage}.md", renderer(state))
-            render.write(out, f"{stage}.json", _dump(state[stage]))
-            raw = interrupt(
-                {
-                    "stage": stage,
-                    "file": str(out / f"{stage}.md"),
-                    "errors": state.get(f"{stage}_errors", []),
-                    "open_questions": state[stage].get("open_questions", []),
-                }
-            )
-            rv = Review.model_validate(raw)
-            update: dict[str, Any] = {"decision": rv.action}
-            if rv.action == "revise":
-                update["sources"] = _add_human_input(state, rv, state[stage].get("open_questions", []))
-            return update
+    # ---------------- Le Gardien : contrôle indépendant après chaque étape ----------------
+    ARTIFACTS = ("sources", "spec", "clarifications", "plan", "tasks", "impl", "verify", "written")
 
-        return review
+    def guardian(state: SDDState):
+        stage = state["stage"]
+        artifacts = {k: state.get(k) for k in ARTIFACTS}
+        if stage == "impl":
+            artifacts["task_id"] = state["task_order"][state["current"]]
+        # Le Gardien est un graphe à part : il ne reçoit qu'un instantané des artefacts, jamais l'état du producteur.
+        report = guardian_graph.invoke(
+            {"stage": stage, "artifacts": artifacts, "accepted": state.get("accepted", [])}
+        )["report"]
+        entry = {
+            "time": _now(), "type": "contrôle", "stage": stage,
+            "task_id": artifacts.get("task_id"),
+            "alerts": [{k: a[k] for k in ("id", "code", "severity", "message")} for a in report],
+        }
+        render.write(out, "alerts.md", render.alerts_md(stage, report))
+        render.write(out, "audit.md", render.audit_md(state.get("audit", []) + [entry]))
+        return {"alerts": report, "audit": [entry], "gate_error": None}
 
-    def review_impl(state: SDDState):
-        impl = state["impl"]
-        raw = interrupt(
-            {
-                "stage": "impl",
-                "task_id": impl["task_id"],
-                "files": [f["path"] for f in impl["files"]],
-                "preview": {f["path"]: f["content"] for f in impl["files"]},
-                "errors": state.get("impl_errors", []),
-            }
-        )
-        rv = Review.model_validate(raw)
-        if rv.action == "approve":
-            written = list(state.get("written", []))
-            for f in impl["files"]:
-                render.write(ws, f["path"], f["content"])
-                if f["path"] not in written:
-                    written.append(f["path"])
-            return {"decision": "approve", "written": written, "current": state["current"] + 1}
-        if rv.action == "revise":
-            return {"decision": "revise", "sources": _add_human_input(state, rv, [])}
-        return {"decision": "abort"}
+    def gate(state: SDDState):
+        stage, alerts = state["stage"], state.get("alerts", [])
+        active = [a for a in alerts if a["severity"] != "info"]
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "kind": "alert" if active else "checkpoint",
+            "blocking": any(a["severity"] == "blocking" for a in active),
+            "alerts": active,
+            "info": [a for a in alerts if a["severity"] == "info"],
+            "open_questions": [a["question"] for a in active if a.get("question")],
+            "file": str(out / STAGE_FILE[stage]),
+            "gate_error": state.get("gate_error"),
+            "errors": [a["message"] for a in active if a["severity"] == "blocking"],
+            "warnings": [a["message"] for a in active if a["severity"] == "warning"],
+        }
+        if stage == "impl":
+            impl = state["impl"]
+            payload |= {"task_id": impl["task_id"], "files": [f["path"] for f in impl["files"]],
+                        "preview": {f["path"]: f["content"] for f in impl["files"]}}
+        if stage == "verify":
+            payload["passed"] = state["verify"]["passed"]
+        raw = interrupt(payload)  # ⏸ pause : l'état est sauvegardé par le checkpointer jusqu'à la décision
 
-    def review_verify(state: SDDState):
-        raw = interrupt(
-            {
-                "stage": "verify",
-                "file": str(out / "verify.md"),
-                "passed": state["verify"]["passed"],
-                "errors": [] if state["verify"]["passed"] else [state["verify"]["output"][-1500:]],
-            }
-        )
-        rv = Review.model_validate(raw)
-        if rv.action == "revise":
-            return {"decision": "revise", "fix_attempts": 0, "sources": _add_human_input(state, rv, [])}
-        return {"decision": rv.action}
+        d = GateDecision.model_validate(raw)
+        answers = {k: v.strip() for k, v in d.answers.items() if v.strip()}
+        action = d.action
+        if answers and action != "abort":
+            action = "answer"  # des réponses saisies ne sont JAMAIS perdues (bug corrigé)
+        error = check_decision(action, answers, d.feedback, d.justification, alerts)
+        entry = {
+            "time": _now(), "type": "décision", "stage": stage, "action": action,
+            "alerts": [a["id"] for a in active], "answers": answers, "feedback": d.feedback.strip(),
+            "justification": d.justification.strip(), "refused": error,
+        }
+        render.write(out, "audit.md", render.audit_md(state.get("audit", []) + [entry]))
+        if error:
+            return {"decision": "invalid", "gate_error": error, "audit": [entry]}
+        update: dict[str, Any] = {"decision": action, "gate_error": None, "audit": [entry]}
+        if action in ("answer", "correct"):
+            qs = [a["question"] for a in active if a.get("question")]
+            update["sources"] = _add_human_input(state, answers, d.feedback, qs)
+            update["answered"] = state.get("answered", []) + [_norm(q["question"]) for q in qs if q["id"] in answers]
+            update["redo"] = redo_node(active, stage, only_questions=(action == "answer" and not d.feedback.strip()))
+            if update["redo"] == "fix":
+                update["fix_attempts"] = 0
+        elif action in ("accept_risk", "continue"):
+            update["accepted"] = state.get("accepted", []) + [a["id"] for a in active]
+        return update
 
     # ---------------- routage ----------------
-    def route(next_ok: str, redo: str):
-        return lambda state: {"approve": next_ok, "revise": redo}.get(state["decision"], END)
+    def route_guardian(state: SDDState):
+        if any(a["severity"] != "info" for a in state.get("alerts", [])) or state["stage"] in checkpoints:
+            return "gate"
+        return NEXT[state["stage"]]
 
-    def route_impl(state: SDDState):
-        if state["decision"] == "revise":
-            return "implement"
-        if state["decision"] == "approve":
-            return "implement" if state["current"] < len(state["task_order"]) else "verify"
-        return END
+    def route_gate(state: SDDState):
+        d = state["decision"]
+        if d == "invalid":
+            return "gate"  # décision refusée : on redemande, avec le motif
+        if d == "abort":
+            return END
+        if d in ("continue", "accept_risk"):
+            return NEXT[state["stage"]]
+        return state["redo"]
+
+    def route_apply(state: SDDState):
+        return "implement" if state["current"] < len(state["task_order"]) else "verify"
 
     def route_verify(state: SDDState):
         if not state["verify"]["passed"] and state.get("fix_attempts", 0) < max_fix_attempts:
             return "fix"
-        return "review_verify"
+        return "guardian"
 
     g = StateGraph(SDDState)
-    # Étapes alignées sur spec-kit : constitution, specify, clarify, plan, tasks, analyze, implement
+    # Production (étapes spec-kit)
     g.add_node("constitution", constitution)
     g.add_node("specify", specify)
     g.add_node("clarify", clarify)
-    g.add_node("review_spec", review_spec)
     g.add_node("plan", plan)
-    g.add_node("review_plan", make_review("plan", render.plan_md))
     g.add_node("tasks", tasks)
     g.add_node("analyze", analyze_node)
     g.add_node("implement", implement)
-    g.add_node("review_impl", review_impl)
+    g.add_node("apply_impl", apply_impl)
     g.add_node("verify", verify)
     g.add_node("fix", fix)
-    g.add_node("review_verify", review_verify)
+    # Contrôle
+    g.add_node("guardian", guardian)
+    g.add_node("gate", gate)
 
     g.add_edge(START, "constitution")
     g.add_edge("constitution", "specify")
     g.add_edge("specify", "clarify")
-    g.add_edge("clarify", "review_spec")
-    g.add_conditional_edges("review_spec", route("plan", "specify"), ["plan", "specify", END])
-    g.add_edge("plan", "review_plan")
-    g.add_conditional_edges("review_plan", route("tasks", "plan"), ["tasks", "plan", END])
+    for producer in ("clarify", "plan", "analyze", "implement"):
+        g.add_edge(producer, "guardian")
     g.add_edge("tasks", "analyze")
-    g.add_conditional_edges("analyze", route("implement", "tasks"), ["implement", "tasks", END])
-    g.add_edge("implement", "review_impl")
-    g.add_conditional_edges("review_impl", route_impl, ["implement", "verify", END])
-    g.add_conditional_edges("verify", route_verify, ["fix", "review_verify"])
+    g.add_conditional_edges("verify", route_verify, ["fix", "guardian"])
     g.add_edge("fix", "verify")
-    g.add_conditional_edges("review_verify", route("__end__", "fix"), ["fix", END])
+    g.add_conditional_edges("guardian", route_guardian, ["gate", "plan", "tasks", "implement", "apply_impl", END])
+    g.add_conditional_edges("gate", route_gate,
+                            ["gate", "specify", "plan", "tasks", "implement", "apply_impl", "fix", END])
+    g.add_conditional_edges("apply_impl", route_apply, ["implement", "verify"])
     return g.compile(checkpointer=checkpointer)

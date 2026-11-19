@@ -115,9 +115,14 @@ def test_out_of_scope_file_rejected():
 
 
 # ---------------------------- graphe complet -------------------------------- #
-def test_full_pipeline_with_retry_and_human_checkpoints(tmp_path):
+def run_until_pause(g, inp, cfg):
+    res = g.invoke(inp, cfg)
+    return res, (res["__interrupt__"][0].value if "__interrupt__" in res else None)
+
+
+def test_factory_mode_runs_end_to_end_without_pause_when_guardian_is_happy(tmp_path):
     llm = FakeLLM({
-        "Spec": [HALLUCINATED_SPEC, GOOD_SPEC],  # 1er essai rejeté -> correction
+        "Spec": [HALLUCINATED_SPEC, GOOD_SPEC],  # 1er essai rejeté par le validateur -> correction
         "Clarifications": [Clarifications()],
         "Plan": [GOOD_PLAN],
         "TaskList": [GOOD_TASKS],
@@ -127,37 +132,156 @@ def test_full_pipeline_with_retry_and_human_checkpoints(tmp_path):
         ],
     })
     g = build_graph(llm, tmp_path, max_retries=2, checkpointer=MemorySaver())
-    cfg = {"configurable": {"thread_id": "t"}}
-    res = g.invoke({"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
-    stages = []
-    while "__interrupt__" in res:
-        payload = res["__interrupt__"][0].value
-        stages.append(payload["stage"])
-        assert payload["errors"] == []
-        res = g.invoke(Command(resume={"action": "approve"}), cfg)
-
-    assert stages == ["clarify", "plan", "analyze", "impl", "impl", "verify"]
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, {"configurable": {"thread_id": "t"}})
+    assert pause is None  # mode usine : aucune alerte => aucune pause
     assert llm.calls["Spec"] == 2
     assert res["task_order"] == ["T-001", "T-002"]
     assert (tmp_path / "workspace/todo/cli.py").read_text() == "# cli\n"
     assert "| REQ-001 | B-001 | T-002 |" in (tmp_path / "tasks.md").read_text()
+    controls = [e["stage"] for e in res["audit"] if e["type"] == "contrôle"]
+    assert controls == ["spec", "plan", "analyze", "impl", "impl", "verify"]  # le Gardien contrôle chaque étape
 
 
-def test_human_answers_become_citable_sources(tmp_path):
-    spec_q = Spec.model_validate(GOOD_SPEC.model_dump() | {
-        "open_questions": [{"id": "Q-001", "question": "Quel format de titre ?", "source_ids": ["B-001"]}]})
-    llm = FakeLLM({"Spec": [spec_q, GOOD_SPEC], "Clarifications": [
+def test_supervised_mode_pauses_at_each_stage(tmp_path):
+    from sdd.graph import SUPERVISED
+
+    llm = FakeLLM({
+        "Spec": [GOOD_SPEC], "Clarifications": [Clarifications()], "Plan": [GOOD_PLAN], "TaskList": [GOOD_TASKS],
+        "Implementation": [
+            Implementation(task_id="T-001", files=[{"path": "todo/store.py", "content": "# store\n"}]),
+            Implementation(task_id="T-002", files=[{"path": "todo/cli.py", "content": "# cli\n"}]),
+        ],
+    })
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver(), checkpoints=SUPERVISED)
+    cfg = {"configurable": {"thread_id": "t"}}
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    stages = []
+    while pause:
+        stages.append(pause["stage"])
+        assert pause["kind"] == "checkpoint" and pause["alerts"] == []
+        if pause["stage"] == "impl":  # rien n'est écrit avant la décision
+            assert not (tmp_path / "workspace" / pause["files"][0]).exists()
+        res, pause = run_until_pause(g, Command(resume={"action": "continue"}), cfg)
+    assert stages == ["spec", "plan", "analyze", "impl", "impl", "verify"]
+
+
+SPEC_Q = Spec.model_validate(GOOD_SPEC.model_dump() | {
+    "open_questions": [{"id": "Q-001", "question": "Quel format de titre ?", "source_ids": ["B-001"]}]})
+
+
+def spec_citing_answer(aid="A-001", quote="Réponse : texte libre"):
+    d = GOOD_SPEC.model_dump()
+    d["requirements"][0]["citations"].append(cite(aid, quote))
+    return Spec.model_validate(d)
+
+
+def test_human_answers_become_citable_sources_and_unanswered_questions_persist(tmp_path):
+    llm = FakeLLM({"Spec": [SPEC_Q, spec_citing_answer()], "Clarifications": [
         Clarifications(questions=[{"id": "Q-001", "question": "Combien de tâches au maximum ?", "source_ids": ["B-001"]}]),
         Clarifications()]})
     g = build_graph(llm, tmp_path, checkpointer=MemorySaver())
     cfg = {"configurable": {"thread_id": "t"}}
-    res = g.invoke({"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
-    qs = res["__interrupt__"][0].value["open_questions"]
-    assert [q["id"] for q in qs] == ["Q-001", "Q-002"]  # spec + clarify, renumérotées
-    res = g.invoke(Command(resume={"action": "revise", "answers": {"Q-001": "texte libre"}}), cfg)
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    assert pause["kind"] == "alert" and pause["blocking"]
+    assert [q["id"] for q in pause["open_questions"]] == ["Q-001", "Q-002"]  # spec + clarify, renumérotées
+    assert {a["code"] for a in pause["alerts"]} == {"QUESTION_OUVERTE"}
+    res, pause = run_until_pause(g, Command(resume={"action": "answer", "answers": {"Q-001": "texte libre"}}), cfg)
     assert any(s["id"] == "A-001" and "texte libre" in s["text"] for s in res["sources"])
-    res = g.invoke(Command(resume={"action": "abort"}), cfg)
-    assert "__interrupt__" not in res
+    # la question sans réponse ne disparaît pas, même si le LLM ne la repose pas
+    assert [q["question"] for q in pause["open_questions"]] == ["Combien de tâches au maximum ?"]
+    assert llm.calls["Implementation"] == 0
+    res, pause = run_until_pause(g, Command(resume={"action": "abort"}), cfg)
+    assert pause is None
+
+
+def test_typed_answers_are_never_lost_even_with_continue(tmp_path):
+    """Bug du dernier test : réponses saisies puis « Approuver » => réponses perdues. Désormais impossible."""
+    llm = FakeLLM({"Spec": [SPEC_Q, spec_citing_answer()], "Clarifications": [Clarifications(), Clarifications()]})
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver(), checkpoints=("spec",))
+    cfg = {"configurable": {"thread_id": "t"}}
+    run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    res, pause = run_until_pause(g, Command(resume={"action": "continue", "answers": {"Q-001": "texte libre"}}), cfg)
+    assert pause["kind"] == "checkpoint"  # spec complète : plus d'alerte
+    assert any(s["id"] == "A-001" for s in res["sources"])
+    assert llm.calls["Spec"] == 2  # specify relancé avec la réponse
+    assert res["audit"][-2]["action"] == "answer"
+
+
+def test_ignored_answer_is_blocking(tmp_path):
+    """Piège : la spec régénérée ne reprend pas la réponse humaine."""
+    llm = FakeLLM({"Spec": [SPEC_Q, GOOD_SPEC, GOOD_SPEC], "Clarifications": [Clarifications(), Clarifications()]})
+    g = build_graph(llm, tmp_path, max_retries=1, checkpointer=MemorySaver())
+    cfg = {"configurable": {"thread_id": "t"}}
+    run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    res, pause = run_until_pause(g, Command(resume={"action": "answer", "answers": {"Q-001": "texte libre"}}), cfg)
+    assert pause["blocking"] and [a["code"] for a in pause["alerts"]] == ["REPONSE_IGNOREE"]
+    assert "A-001" in pause["alerts"][0]["refs"] and pause["alerts"][0]["redo"] == "specify"
+
+
+def test_implementation_cannot_start_while_a_question_is_open(tmp_path):
+    llm = FakeLLM({"Spec": [SPEC_Q], "Clarifications": [Clarifications()], "Plan": [GOOD_PLAN],
+                   "TaskList": [GOOD_TASKS], "Implementation": []})
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver())
+    cfg = {"configurable": {"thread_id": "t"}}
+    run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    for bad in ({"action": "continue"}, {"action": "accept_risk"}, {"action": "answer", "answers": {"Q-001": "   "}},
+                {"action": "correct", "feedback": ""}):
+        res, pause = run_until_pause(g, Command(resume=bad), cfg)
+        assert pause and pause["stage"] == "spec" and pause["gate_error"], bad  # décision refusée, toujours en pause
+    assert llm.calls["Plan"] == 0 and llm.calls["Implementation"] == 0
+    refused = [e for e in res["audit"] if e["type"] == "décision" and e["refused"]]
+    assert len(refused) == 4  # chaque refus est tracé
+
+
+def test_accepted_risk_is_audited_and_not_raised_again(tmp_path):
+    llm = FakeLLM({"Spec": [SPEC_Q], "Clarifications": [Clarifications()], "Plan": [GOOD_PLAN],
+                   "TaskList": [GOOD_TASKS], "Implementation": [
+                       Implementation(task_id="T-001", files=[{"path": "todo/store.py", "content": "# store\n"}]),
+                       Implementation(task_id="T-002", files=[{"path": "todo/cli.py", "content": "# cli\n"}])]})
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver())
+    cfg = {"configurable": {"thread_id": "t"}}
+    run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    res, pause = run_until_pause(
+        g, Command(resume={"action": "accept_risk", "justification": "Titre libre, sans contrainte de format."}), cfg)
+    assert pause is None  # la même question n'est plus bloquante aux étapes suivantes
+    accepted = [a for e in res["audit"] if e["type"] == "contrôle" and e["stage"] == "analyze" for a in e["alerts"]]
+    assert [(a["code"], a["severity"]) for a in accepted] == [("QUESTION_OUVERTE", "info")]
+    decision = next(e for e in res["audit"] if e["type"] == "décision")
+    assert decision["action"] == "accept_risk" and "Titre libre" in decision["justification"]
+    assert "accept_risk" in (tmp_path / "audit.md").read_text()
+
+
+def test_plan_question_blocks_and_answer_resumes_at_plan(tmp_path):
+    plan_q = Plan.model_validate(GOOD_PLAN.model_dump() | {
+        "open_questions": [{"id": "Q-001", "question": "Quel nom pour le fichier JSON ?", "source_ids": ["B-002"]}]})
+    llm = FakeLLM({"Spec": [GOOD_SPEC], "Clarifications": [Clarifications()], "Plan": [plan_q, GOOD_PLAN]})
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver(), checkpoints=("plan",))
+    cfg = {"configurable": {"thread_id": "t"}}
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    assert pause["stage"] == "plan" and pause["open_questions"][0]["id"] == "QP-001"
+    res, pause = run_until_pause(g, Command(resume={"action": "answer", "answers": {"QP-001": "todo.json"}}), cfg)
+    assert llm.calls["Spec"] == 1 and llm.calls["Plan"] == 2  # reprise au bon nœud : plan, pas specify
+    assert pause["kind"] == "checkpoint" and any(s["id"] == "A-001" for s in res["sources"])
+
+
+def test_correction_resumes_the_faulty_task_with_feedback(tmp_path):
+    llm = FakeLLM({
+        "Spec": [GOOD_SPEC], "Clarifications": [Clarifications()], "Plan": [GOOD_PLAN], "TaskList": [GOOD_TASKS],
+        "Implementation": [
+            Implementation(task_id="T-001", files=[{"path": "todo/store.py", "content": "import requests\n"}]),
+            Implementation(task_id="T-001", files=[{"path": "todo/store.py", "content": "import json\n"}]),
+            Implementation(task_id="T-002", files=[{"path": "todo/cli.py", "content": "# cli\n"}]),
+        ],
+    })
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver())
+    cfg = {"configurable": {"thread_id": "t"}}
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    assert pause["stage"] == "impl" and pause["alerts"][0]["code"] == "DEPENDANCE_NON_SOURCEE"
+    assert not (tmp_path / "workspace/todo/store.py").exists()  # rien d'écrit pendant la pause
+    res, pause = run_until_pause(g, Command(resume={"action": "correct", "feedback": "Utilise uniquement la bibliothèque standard."}), cfg)
+    assert pause is None
+    assert any(s["id"] == "F-001" for s in res["sources"])
+    assert (tmp_path / "workspace/todo/store.py").read_text() == "import json\n"
 
 
 def test_verify_runs_tests_and_fix_cannot_touch_tests(tmp_path):
@@ -182,13 +306,26 @@ def test_verify_runs_tests_and_fix_cannot_touch_tests(tmp_path):
         ],
     })
     g = build_graph(llm, tmp_path, max_retries=2, checkpointer=MemorySaver())
-    cfg = {"configurable": {"thread_id": "t"}}
-    res = g.invoke({"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
-    while res["__interrupt__"][0].value["stage"] != "verify":
-        res = g.invoke(Command(resume={"action": "approve"}), cfg)
-    assert res["__interrupt__"][0].value["passed"] is True
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, {"configurable": {"thread_id": "t"}})
+    assert pause is None and res["verify"]["passed"] is True
     assert res["fix_attempts"] == 1
     assert (tmp_path / "workspace/tests/test_store.py").read_text() == test_code
+
+
+def test_failing_tests_after_fixes_raise_a_blocking_alert(tmp_path):
+    tasks = TaskList.model_validate({"tasks": [
+        {"id": "T-001", "title": "Stockage", "description": "store", "requirement_ids": ["REQ-002", "REQ-001"],
+         "plan_item_ids": ["PLN-001", "PLN-002"], "files": ["store.py", "tests/test_store.py"],
+         "acceptance_criteria": ["ajouter une tâche avec un titre"]}]})
+    test_code = "def test_x():\n    assert False\n"
+    llm = FakeLLM({"Spec": [GOOD_SPEC], "Clarifications": [Clarifications()], "Plan": [GOOD_PLAN], "TaskList": [tasks],
+                   "Implementation": [Implementation(task_id="T-001", files=[
+                       {"path": "store.py", "content": "X = 1\n"}, {"path": "tests/test_store.py", "content": test_code}]),
+                       Implementation(task_id="FIX", files=[{"path": "store.py", "content": "X = 2\n"}])]})
+    g = build_graph(llm, tmp_path, max_retries=0, max_fix_attempts=1, checkpointer=MemorySaver())
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, {"configurable": {"thread_id": "t"}})
+    assert pause["stage"] == "verify" and pause["passed"] is False
+    assert [a["code"] for a in pause["alerts"]] == ["TESTS_EN_ECHEC"]
 
 
 def test_escaped_newlines_rejected():
@@ -204,7 +341,7 @@ def test_require_tests_option():
 
 
 def test_fallback_model_used_when_primary_fails():
-    from sdd.graph import generate
+    from sdd.llm import generate
 
     class Broken:
         def with_structured_output(self, schema, **_kw):

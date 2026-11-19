@@ -3,9 +3,9 @@
 Lancement depuis la racine du dépôt :  sdd-ui   (ou : streamlit run src/sdd/ui.py)
 
 L'interface ne fait que remplacer le terminal de `cli.py` : elle envoie le brief et la constitution
-au graphe, affiche chaque étape et chaque artefact, et transmet les décisions humaines
-(approuver / réviser / arrêter) via `Command(resume=...)`. Les garde-fous de déterminisme
-(validateurs, sources citables, points de contrôle) restent ceux du graphe, inchangés.
+au graphe, affiche chaque étape et chaque artefact, présente les alertes du Gardien (boîte d'alertes)
+et transmet la décision humaine (répondre / corriger / accepter le risque / continuer / arrêter) via
+`Command(resume=...)`. Les garde-fous (validateurs, Gardien, journal d'audit) restent ceux du graphe.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT_OUT = Path(os.getenv("SDD_UI_OUT", "out/ui"))
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-ARTIFACTS = ["spec.md", "plan.md", "tasks.md", "analyze.md", "verify.md", "sources.json"]
+ARTIFACTS = ["alerts.md", "audit.md", "spec.md", "plan.md", "tasks.md", "analyze.md", "verify.md", "sources.json"]
 
 
 def launch() -> None:
@@ -39,27 +39,29 @@ def _example(name: str) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def _graph(thread: str, max_retries: int, require_tests: bool):
+def _graph(thread: str, max_retries: int, require_tests: bool, factory: bool):
     """Un graphe par session, avec son checkpointer SQLite (reprise possible, comme la CLI)."""
     import streamlit as st
 
-    from sdd.llm import fallback_name, model_name, provider
+    from sdd.llm import fallback_name, guardian_name, guardian_semantic_enabled, model_name, provider
 
     @st.cache_resource(show_spinner=False)
-    def build(thread: str, max_retries: int, require_tests: bool, _llm_key: tuple):
+    def build(thread: str, max_retries: int, require_tests: bool, factory: bool, _llm_key: tuple):
         from langgraph.checkpoint.sqlite import SqliteSaver
 
-        from sdd.graph import build_graph
-        from sdd.llm import get_fallback_llm, get_llm
+        from sdd.graph import SUPERVISED, build_graph
+        from sdd.llm import get_fallback_llm, get_guardian_llm, get_llm
 
         out = ROOT_OUT / thread
         out.mkdir(parents=True, exist_ok=True)
         saver = SqliteSaver(sqlite3.connect(out / "checkpoints.db", check_same_thread=False))
         return build_graph(get_llm(), out, max_retries, checkpointer=saver, require_tests=require_tests,
-                           fallback_llm=get_fallback_llm())
+                           fallback_llm=get_fallback_llm(), guardian_llm=get_guardian_llm(),
+                           checkpoints=() if factory else SUPERVISED)
 
-    # le graphe est reconstruit si l'on change de fournisseur ou de modèle
-    return build(thread, max_retries, require_tests, (provider(), model_name(), fallback_name()))
+    # le graphe est reconstruit si l'on change de fournisseur, de modèle ou de réglage du Gardien
+    key = (provider(), model_name(), fallback_name(), guardian_name(), guardian_semantic_enabled())
+    return build(thread, max_retries, require_tests, factory, key)
 
 
 def _cfg(thread: str) -> dict:
@@ -141,11 +143,24 @@ def render() -> None:
         max_retries = st.number_input("Corrections automatiques par étape", 0, 6, 3)
         require_tests = st.checkbox("Exiger une tâche de test par exigence fonctionnelle", value=True)
         st.divider()
+        st.subheader("🛡️ Gardien")
+        factory = st.checkbox("Mode usine : pause uniquement sur alerte du Gardien", value=True,
+                              help="Décoché (mode supervisé) : pause aussi à la fin de chaque étape.")
+        semantic = st.checkbox("Contrôle sémantique par LLM (en plus des contrôles déterministes)", value=True,
+                               help="Le LLM du Gardien ne peut que lever des alertes, jamais valider.")
+        os.environ["SDD_GUARDIAN_SEMANTIC"] = "1" if semantic else "0"
+        if semantic:
+            g_opts = ["(même modèle)"] + [m for m in (available or []) if m != model]
+            g_cur = os.getenv("SDD_GUARDIAN_MODEL") or "(même modèle)"
+            g_model = st.selectbox("Modèle du Gardien (idéalement différent du producteur)", g_opts,
+                                   index=g_opts.index(g_cur) if g_cur in g_opts else 0)
+            os.environ["SDD_GUARDIAN_MODEL"] = "" if g_model == "(même modèle)" else g_model
+        st.divider()
         st.subheader("Reprendre une session")
         old = st.text_input("Identifiant de session", placeholder="ex. 3f9a1c2b")
         if st.button("Reprendre", disabled=not old):
             ss.update(thread=old.strip(), log=[], finished=False, error=None)
-            snap = _graph(ss.thread, max_retries, require_tests).get_state(_cfg(ss.thread))
+            snap = _graph(ss.thread, max_retries, require_tests, factory).get_state(_cfg(ss.thread))
             if not snap.values:
                 ss.error = f"Session {ss.thread} introuvable dans {ROOT_OUT}."
                 ss.thread = None
@@ -160,10 +175,11 @@ def render() -> None:
                 ss.update(thread=None, log=[], pending=None, finished=False, error=None)
                 st.rerun()
 
-    st.title("📐 SDD Pipeline déterministe")
+    st.title("📐 SDD Pipeline déterministe · 🛡️ Gardien")
     st.caption("constitution → specify → clarify → plan → tasks → analyze → implement. "
                "Le modèle transforme vos textes ; il n'a pas le droit d'inventer. Chaque phrase devient une source "
-               "citable (C-001, B-001…) et chaque étape est validée par du code avant de vous être montrée.")
+               "citable (C-001, B-001…). Après chaque étape, le Gardien, un vérificateur indépendant, contrôle la "
+               "cohérence brief ↔ spec ↔ plan ↔ tâches ↔ code et met le workflow en pause au moindre problème.")
 
     if ss.error:
         st.error(ss.error)
@@ -183,7 +199,7 @@ def render() -> None:
         return cb
 
     def run(inp, label: str) -> None:
-        graph = _graph(ss.thread, max_retries, require_tests)
+        graph = _graph(ss.thread, max_retries, require_tests, factory)
         with st.status(label, expanded=True) as status:
             try:
                 ss.pending = advance(graph, inp, _cfg(ss.thread), on_update(status))
@@ -218,52 +234,70 @@ def render() -> None:
             run({"brief": brief, "constitution": constitution}, "Exécution : constitution → specify → clarify…")
         return
 
-    # ------------------------------ 2. point de contrôle ------------------------------
+    # ------------------------------ 2. boîte d'alertes du Gardien ------------------------------
     p = ss.pending
     if p:
         stage = p["stage"]
-        st.subheader("⏸ " + STAGE_TITLES.get(stage, stage))
+        if p["kind"] == "alert":
+            st.subheader("🚨 Boîte d'alertes du Gardien : " + STAGE_TITLES.get(stage, stage))
+            st.caption("Le Gardien a détecté un problème : le workflow SDD est **en pause** et attend votre décision. "
+                       "Rien n'est écrit ni généré tant que vous n'avez pas tranché.")
+        else:
+            st.subheader("⏸ Point de contrôle : " + STAGE_TITLES.get(stage, stage))
+            st.caption("Mode supervisé : le Gardien n'a rien trouvé, mais vous validez chaque étape.")
+        if p.get("gate_error"):
+            st.error("Décision refusée : " + p["gate_error"])
+        for a in p.get("alerts", []):
+            refs = f" · {', '.join(a['refs'])}" if a["refs"] else ""
+            text = (f"**{a['code']}** ({a['origin']}{refs})  \n{a['message']}  \n"
+                    f"_Reprise à l'étape : {a['redo']}_")
+            (st.error if a["severity"] == "blocking" else st.warning)(text, icon="⛔" if a["severity"] == "blocking" else "⚠️")
+        if p.get("info"):
+            with st.expander(f"Informations du Gardien ({len(p['info'])})"):
+                for a in p["info"]:
+                    st.info(("Risque déjà accepté : " if a.get("accepted") else "") + f"**{a['code']}** {a['message']}")
         if p.get("file") and Path(p["file"]).exists():
-            with st.expander(f"Artefact : {Path(p['file']).name}", expanded=True):
+            with st.expander(f"Artefact : {Path(p['file']).name}", expanded=p["kind"] != "alert"):
                 st.markdown(Path(p["file"]).read_text(encoding="utf-8"))
         if stage == "impl":
-            st.caption(f"Tâche **{p['task_id']}** — fichiers écrits seulement si vous approuvez.")
+            st.caption(f"Tâche **{p['task_id']}** : les fichiers ne sont écrits qu'après votre décision.")
             for path, content in p.get("preview", {}).items():
-                with st.expander(path, expanded=True):
+                with st.expander(path, expanded=p["kind"] != "alert"):
                     st.code(content, language="python" if path.endswith(".py") else None)
         if "passed" in p:
-            if p["passed"]:
-                st.success("Tests : OK")
-            else:
-                st.error("Tests : échec")
-        for e in p.get("errors", []):
-            st.error(e)
-        for w in p.get("warnings", []):
-            st.warning(w)
+            (st.success if p["passed"] else st.error)("Tests : " + ("OK" if p["passed"] else "échec"))
 
-        with st.form(f"review-{stage}-{len(ss.log)}"):
+        with st.form(f"gate-{stage}-{len(ss.log)}"):
             answers = {}
             qs = p.get("open_questions", [])
             if qs:
-                st.markdown("**Questions ouvertes** : vos réponses deviennent des sources citables (A-001…). "
-                            "Laissez vide pour ne pas répondre.")
+                st.markdown("**Questions ouvertes** : vos réponses deviennent des sources citables (A-001…) "
+                            "et le workflow reprend à l'étape concernée.")
             for q in qs:
                 answers[q["id"]] = st.text_input(f"{q['id']} — {q['question']}")
-            feedback = st.text_area("Retour libre (devient une source F-xxx si vous choisissez « Réviser »)")
-            b1, b2, b3 = st.columns(3)
-            approve = b1.form_submit_button("✅ Approuver et continuer", type="primary")
-            revise = b2.form_submit_button("✏️ Réviser avec mes réponses")
-            abort = b3.form_submit_button("⏹ Arrêter")
-        if approve:
-            run_resume({"action": "approve"}, "Reprise après approbation…")
-        elif revise:
-            filled = {k: v.strip() for k, v in answers.items() if v.strip()}
-            if not filled and not feedback.strip():
-                st.warning("Pour réviser, répondez à au moins une question ou écrivez un retour.")
-            else:
-                run_resume({"action": "revise", "answers": filled, "feedback": feedback}, "Révision en cours…")
-        elif abort:
-            run_resume({"action": "abort"}, "Arrêt…")
+            feedback = st.text_area("Correction (devient une source F-xxx, puis l'étape fautive est relancée)")
+            justification = st.text_area("Justification (obligatoire pour accepter le risque, tracée dans l'audit)")
+            cols = st.columns(5)
+            b_answer = cols[0].form_submit_button("💬 Répondre et reprendre", type="primary", disabled=not qs)
+            b_correct = cols[1].form_submit_button("✏️ Corriger et reprendre")
+            b_accept = cols[2].form_submit_button("⚠️ Accepter le risque", disabled=p["kind"] != "alert")
+            b_continue = cols[3].form_submit_button("▶ Continuer", disabled=p["blocking"],
+                                                    type="primary" if not qs else "secondary")
+            b_abort = cols[4].form_submit_button("⏹ Arrêter")
+        filled = {k: v.strip() for k, v in answers.items() if v.strip()}
+        decision = None
+        if b_answer:
+            decision = {"action": "answer", "answers": filled, "feedback": feedback}
+        elif b_correct:
+            decision = {"action": "correct", "answers": filled, "feedback": feedback}
+        elif b_accept:
+            decision = {"action": "accept_risk", "answers": filled, "justification": justification}
+        elif b_continue:
+            decision = {"action": "continue", "answers": filled}
+        elif b_abort:
+            decision = {"action": "abort"}
+        if decision:  # la validation (justification, réponses…) est faite par le graphe, pas par l'UI
+            run_resume(decision, "Reprise du workflow…")
     elif not ss.finished:  # interrompu par une erreur (quota, réseau…) : reprise depuis le dernier checkpoint
         if st.button("↻ Reprendre là où le workflow s'est arrêté", type="primary"):
             run(None, "Reprise depuis le dernier checkpoint…")

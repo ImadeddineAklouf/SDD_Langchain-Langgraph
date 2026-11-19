@@ -3,6 +3,8 @@
 SDD_PROVIDER = gemini (défaut, API Google gratuite) | groq | ollama (local, optionnel)
 SDD_MODEL    = nom du modèle (défaut selon le fournisseur)
 SDD_FALLBACK_MODEL = modèle de secours si le principal échoue (quota...)
+SDD_GUARDIAN_MODEL = modèle du Gardien (contrôle sémantique), idéalement différent du producteur
+SDD_GUARDIAN_SEMANTIC = 1 (défaut) | 0 : active le contrôle sémantique par LLM du Gardien
 SDD_NUM_CTX  = taille du contexte Ollama en tokens (défaut 16384)
 SDD_STRUCTURED_METHOD = json_schema (défaut) | function_calling | json_mode
 OLLAMA_HOST  = adresse du serveur Ollama (défaut http://localhost:11434)
@@ -39,6 +41,20 @@ def get_fallback_llm():
     """Modèle de secours (quota atteint, panne). SDD_FALLBACK_MODEL="" pour désactiver."""
     model = fallback_name()
     return get_llm(model) if model else None
+
+
+def guardian_name() -> str:
+    """Modèle du Gardien : SDD_GUARDIAN_MODEL, sinon le modèle principal."""
+    return os.getenv("SDD_GUARDIAN_MODEL") or model_name()
+
+
+def guardian_semantic_enabled() -> bool:
+    return os.getenv("SDD_GUARDIAN_SEMANTIC", "1").strip().lower() not in ("0", "false", "non", "no", "")
+
+
+def get_guardian_llm():
+    """LLM du Gardien, ou None si le contrôle sémantique est désactivé (contrôles déterministes seuls)."""
+    return get_llm(guardian_name()) if guardian_semantic_enabled() else None
 
 
 def get_llm(model: str | None = None):
@@ -128,3 +144,48 @@ def structured_method() -> str:
     au schéma JSON (le modèle ne peut pas répondre en texte libre). Gemini reçoit le schéma dans
     `response_json_schema`, Ollama dans `format` : dans les deux cas la génération est contrainte."""
     return os.getenv("SDD_STRUCTURED_METHOD", "json_schema")
+
+
+def generate(llm, schema, system: str, payload: str, validate, max_retries: int, fallback_llm=None):
+    """Appel LLM structuré (LCEL : prompt | modèle structuré) + validation déterministe + correction bornée.
+
+    Ne lève pas si l'objet reste invalide : renvoie le dernier objet et ses erreurs,
+    que le Gardien transformera en alertes.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system), ("human", "{input}"), MessagesPlaceholder("corrections", optional=True)]
+    )
+    model = llm.with_structured_output(schema, method=structured_method())
+    if fallback_llm is not None:  # mécanisme standard LangChain : bascule si le modèle principal échoue
+        model = model.with_fallbacks([fallback_llm.with_structured_output(schema, method=structured_method())])
+    chain = prompt | model  # LCEL
+    corrections: list = []
+    obj, errors = None, ["Aucune sortie."]
+    for _ in range(max_retries + 1):
+        try:
+            out = chain.invoke({"input": payload, "corrections": corrections})
+            obj = out if isinstance(out, schema) else schema.model_validate(out)
+            errors = validate(obj)
+        except Exception as exc:
+            if is_api_error(exc):  # clé, modèle introuvable, réseau, quota : inutile de redemander
+                raise
+            errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
+        if not errors:
+            return obj, []
+        if obj is not None:
+            corrections.append(AIMessage(obj.model_dump_json()))
+        corrections.append(
+            HumanMessage(
+                "Ta réponse est rejetée par le validateur :\n- "
+                + "\n- ".join(errors)
+                + "\nCorrige UNIQUEMENT ces points, sans rien ajouter d'autre."
+            )
+        )
+    if obj is None:
+        raise RuntimeError("Le modèle n'a produit aucune sortie valide : " + "; ".join(errors))
+    return obj, errors
+
+

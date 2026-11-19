@@ -117,9 +117,40 @@ class Implementation(Strict):
 
 
 # --------------------------------------------------------------------------- #
-# Revue humaine (payload de reprise après interrupt)
+# Le Gardien : alertes, constats sémantiques et décision humaine
 # --------------------------------------------------------------------------- #
-class Review(Strict):
-    action: Literal["approve", "revise", "abort"]
+Severity = Literal["blocking", "warning", "info"]
+
+
+class Alert(Strict):
+    """Alerte levée par le Gardien. `id` est une empreinte stable (même problème = même id)."""
+    id: str
+    code: str = Field(description="Type de contrôle, ex. QUESTION_OUVERTE, REPONSE_IGNOREE")
+    severity: Severity
+    stage: str = Field(description="Étape contrôlée : spec, plan, analyze, impl, verify")
+    message: str
+    refs: list[str] = Field(default_factory=list, description="Ids concernés : B-001, REQ-002, T-003...")
+    redo: str = Field(description="Nœud SDD à relancer pour corriger")
+    origin: Literal["déterministe", "sémantique"] = "déterministe"
+    question: dict | None = Field(default=None, description="Question ouverte à laquelle l'humain peut répondre")
+    accepted: bool = Field(default=False, description="Risque déjà accepté/acquitté par l'humain (rétrogradé en info)")
+
+
+class Finding(Strict):
+    """Constat du contrôle sémantique (LLM). Il ne peut que signaler, jamais valider."""
+    kind: Literal["contradiction", "hors_perimetre", "deformation", "incoherence"]
+    severity: Literal["blocking", "warning"]
+    refs: list[str] = Field(min_length=1, description="Ids EXISTANTS concernés (B-001, A-001, REQ-001, PLN-001, T-001)")
+    message: str = Field(description="Explication courte et factuelle, en français")
+
+
+class SemanticReview(Strict):
+    findings: list[Finding] = Field(default_factory=list, max_length=8)
+
+
+class GateDecision(Strict):
+    """Décision humaine à la porte du Gardien (charge utile de reprise après interrupt)."""
+    action: Literal["continue", "answer", "correct", "accept_risk", "abort"]
     answers: dict[str, str] = Field(default_factory=dict, description="Réponses aux questions ouvertes: {Q-001: '...'}")
-    feedback: str = ""
+    feedback: str = Field(default="", description="Correction demandée (devient une source F-xxx)")
+    justification: str = Field(default="", description="Obligatoire pour accepter un risque")

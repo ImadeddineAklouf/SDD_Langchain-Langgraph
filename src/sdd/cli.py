@@ -1,4 +1,4 @@
-"""CLI interactive : lance le graphe et gère les points de contrôle humains.
+"""CLI interactive : lance le graphe SDD et traite les alertes du Gardien dans le terminal.
 
 Usage : python -m sdd.cli examples/brief.md [--constitution examples/constitution.md] [--out out]
 """
@@ -14,39 +14,48 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langgraph.types import Command
 
-from .graph import build_graph
-from .llm import PROVIDERS, get_fallback_llm, get_llm
+from .graph import SUPERVISED, build_graph
+from .llm import PROVIDERS, get_fallback_llm, get_guardian_llm, get_llm
 
 
-def _ask_review(payload: dict) -> dict:
+SEV = {"blocking": "⛔", "warning": "⚠️ ", "info": "ℹ️ "}
+
+
+def _ask_gate(payload: dict) -> dict:
+    """Boîte d'alertes du Gardien en mode terminal."""
     print("\n" + "=" * 70)
-    print(f"POINT DE CONTRÔLE : {payload['stage']}")
-    if "file" in payload:
+    title = "ALERTE DU GARDIEN" if payload["kind"] == "alert" else "POINT DE CONTRÔLE"
+    print(f"{title} — étape : {payload['stage']}")
+    if payload.get("file"):
         print(f"Artefact : {payload['file']}")
+    if payload.get("gate_error"):
+        print(f"  ❌ Décision refusée : {payload['gate_error']}")
     if payload.get("preview"):
         for path, content in payload["preview"].items():
             print(f"\n--- {path} ---\n{content}")
     if "passed" in payload:
         print("Tests :", "✅ OK" if payload["passed"] else "❌ échec")
-    for e in payload.get("errors", []):
-        print(f"  ❌ {e}")
-    for w in payload.get("warnings", []):
-        print(f"  ⚠️  {w}")
+    for a in payload["alerts"] + payload.get("info", []):
+        print(f"  {SEV[a['severity']]} [{a['code']}] {a['message']}  (refs : {', '.join(a['refs']) or '—'})")
     qs = payload.get("open_questions", [])
-    for q in qs:
-        print(f"  ❓ {q['id']} {q['question']}")
-    choice = input("\n[a]pprouver / [r]éviser / [q]uitter > ").strip().lower()
+    menu = "[r]épondre / [c]orriger / [a]ccepter le risque / [q]uitter"
+    if not payload["blocking"]:
+        menu = "[ENTRÉE] continuer / " + menu
+    choice = input(f"\n{menu} > ").strip().lower()
     if choice.startswith("q"):
         return {"action": "abort"}
     if choice.startswith("a"):
-        return {"action": "approve"}
-    answers = {}
-    for q in qs:
-        ans = input(f"Réponse à {q['id']} (vide = passer) > ").strip()
-        if ans:
-            answers[q["id"]] = ans
-    feedback = input("Retour libre (vide = aucun) > ").strip()
-    return {"action": "revise", "answers": answers, "feedback": feedback}
+        return {"action": "accept_risk", "justification": input("Justification (obligatoire) > ").strip()}
+    if choice.startswith("r"):
+        answers = {}
+        for q in qs:
+            ans = input(f"Réponse à {q['id']} {q['question']} (vide = passer) > ").strip()
+            if ans:
+                answers[q["id"]] = ans
+        return {"action": "answer", "answers": answers}
+    if choice.startswith("c"):
+        return {"action": "correct", "feedback": input("Correction attendue > ").strip()}
+    return {"action": "continue"}
 
 
 def main() -> None:
@@ -58,7 +67,10 @@ def main() -> None:
     ap.add_argument("--thread", default=None, help="Reprendre une session existante")
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--require-tests", action="store_true", help="Chaque exigence fonctionnelle doit avoir une tâche de test")
-    ap.add_argument("--provider", choices=PROVIDERS, default=None, help="Fournisseur (sinon SDD_PROVIDER, défaut ollama)")
+    ap.add_argument("--supervised", action="store_true",
+                    help="Pause à chaque étape (sinon mode usine : pause seulement sur alerte du Gardien)")
+    ap.add_argument("--no-semantic", action="store_true", help="Gardien : contrôles déterministes seulement (sans LLM)")
+    ap.add_argument("--provider", choices=PROVIDERS, default=None, help="Fournisseur (sinon SDD_PROVIDER, défaut gemini)")
     ap.add_argument("--model", default=None, help="Modèle (sinon SDD_MODEL, défaut selon le fournisseur)")
     args = ap.parse_args()
     if args.provider:
@@ -74,7 +86,9 @@ def main() -> None:
     Path(args.out).mkdir(parents=True, exist_ok=True)
     saver = SqliteSaver(sqlite3.connect(Path(args.out) / "checkpoints.db", check_same_thread=False))
     graph = build_graph(get_llm(), args.out, args.max_retries, checkpointer=saver, require_tests=args.require_tests,
-                        fallback_llm=get_fallback_llm())
+                        fallback_llm=get_fallback_llm(),
+                        guardian_llm=None if args.no_semantic else get_guardian_llm(),
+                        checkpoints=SUPERVISED if args.supervised else ())
     thread = args.thread or uuid.uuid4().hex[:8]
     cfg = {"configurable": {"thread_id": thread}}
     print(f"Session : {thread} (reprendre avec --thread {thread})")
@@ -91,7 +105,7 @@ def main() -> None:
         intr = result.get("__interrupt__")
         if not intr:
             break
-        inp = Command(resume=_ask_review(intr[0].value))
+        inp = Command(resume=_ask_gate(intr[0].value))
     print("\nTerminé. Fichiers écrits :", json.dumps(result.get("written", []), ensure_ascii=False))
 
 

@@ -1,6 +1,6 @@
 """Pilotage pas à pas du graphe, partagé par l'interface web (sans dépendance à Streamlit).
 
-`advance()` exécute le graphe jusqu'au prochain point de contrôle humain (interrupt) ou jusqu'à la fin,
+`advance()` exécute le graphe jusqu'à la prochaine pause (alerte du Gardien, interrupt) ou jusqu'à la fin,
 en signalant chaque nœud terminé. Elle n'ajoute aucune donnée : elle ne fait que transmettre
 l'entrée initiale (brief + constitution) ou la décision humaine (`Command(resume=...)`).
 """
@@ -19,28 +19,32 @@ STEPS: list[tuple[str, str]] = [
     ("tasks", "5. Tasks"),
     ("analyze", "6. Analyze"),
     ("implement", "7. Implement"),
+    ("guardian", "🛡️ Gardien"),
 ]
 NODE_TO_STEP = {
     "constitution": "constitution",
     "specify": "specify",
     "clarify": "clarify",
-    "review_spec": "clarify",
     "plan": "plan",
-    "review_plan": "plan",
     "tasks": "tasks",
     "analyze": "analyze",
     "implement": "implement",
-    "review_impl": "implement",
+    "apply_impl": "implement",
     "verify": "implement",
     "fix": "implement",
-    "review_verify": "implement",
+    "guardian": "guardian",
+    "gate": "guardian",
 }
 STAGE_TITLES = {
-    "clarify": "Clarify : relire la spécification et répondre aux questions",
-    "plan": "Plan : relire le plan technique",
-    "analyze": "Analyze : contrôle croisé spec ↔ plan ↔ tâches",
-    "impl": "Implement : relire le code proposé pour la tâche",
-    "verify": "Verify : résultat des tests",
+    "spec": "Spécification (specify + clarify)",
+    "plan": "Plan technique",
+    "analyze": "Tâches et analyse croisée spec ↔ plan ↔ tâches",
+    "impl": "Implémentation de la tâche",
+    "verify": "Vérification (tests)",
+}
+ACTIONS = {
+    "continue": "continuer", "answer": "répondre", "correct": "corriger",
+    "accept_risk": "accepter le risque", "abort": "arrêter", "invalid": "décision refusée",
 }
 
 
@@ -73,8 +77,16 @@ def summarize(node: str, update: dict[str, Any] | None) -> str:
         return "tests OK" if v.get("passed") else "tests en échec"
     if node == "fix":
         return f"tentative de correction n°{u.get('fix_attempts', '?')}"
-    if node.startswith("review_"):
-        return f"décision humaine : {u.get('decision', '?')}"
+    if node == "apply_impl":
+        return "fichiers écrits dans le workspace"
+    if node == "guardian":
+        al = u.get("alerts", [])
+        n = {s: sum(1 for a in al if a["severity"] == s) for s in ("blocking", "warning", "info")}
+        if not n["blocking"] and not n["warning"]:
+            return f"aucune incohérence ({n['info']} info)"
+        return f"⛔ {n['blocking']} bloquante(s), ⚠️ {n['warning']} avertissement(s) : pause"
+    if node == "gate":
+        return f"décision humaine : {ACTIONS.get(u.get('decision', ''), u.get('decision', '?'))}"
     return ""
 
 
@@ -93,5 +105,5 @@ def advance(graph, inp, cfg: dict, on_update: Callable[[str, dict], None] | None
 
 
 def resume(graph, cfg: dict, review: dict, on_update=None) -> dict | None:
-    """Transmet la décision humaine (approve / revise / abort) au point de contrôle en attente."""
+    """Transmet la décision humaine (continue / answer / correct / accept_risk / abort) à la porte du Gardien."""
     return advance(graph, Command(resume=review), cfg, on_update)

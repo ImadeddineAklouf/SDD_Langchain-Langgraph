@@ -85,3 +85,45 @@ def analyze_md(state, res) -> str:
     covered = sum(1 for r in req if any(r["id"] in t["requirement_ids"] for t in tl))
     out.append(f"## Couverture\n{covered}/{len(req)} exigences couvertes par au moins une tâche.\n")
     return "\n".join(out)
+
+
+SEVERITY_ICON = {"blocking": "⛔ bloquante", "warning": "⚠️ avertissement", "info": "ℹ️ info"}
+STAGE_NAMES = {"spec": "Spécification", "plan": "Plan", "analyze": "Analyse (tâches)", "impl": "Implémentation",
+               "verify": "Vérification"}
+
+
+def alerts_md(stage: str, alerts: list[dict]) -> str:
+    """Rapport du dernier contrôle du Gardien."""
+    out = [f"# Rapport du Gardien : {STAGE_NAMES.get(stage, stage)}\n"]
+    if not any(a["severity"] != "info" for a in alerts):
+        out.append("> ✅ Aucune incohérence : le workflow continue.\n")
+    for a in alerts:
+        tag = " (risque accepté)" if a.get("accepted") else ""
+        refs = f" — _{', '.join(a['refs'])}_" if a["refs"] else ""
+        out.append(f"- **{SEVERITY_ICON[a['severity']]}{tag}** `{a['code']}` ({a['origin']}){refs}  \n"
+                   f"  {a['message']}  \n  _À reprendre à : {a['redo']} · id {a['id']}_")
+    return "\n".join(out) + "\n"
+
+
+def audit_md(audit: list[dict]) -> str:
+    """Journal d'audit lisible : chaque contrôle du Gardien et chaque décision humaine."""
+    out = ["# Journal d'audit (Gardien + décisions humaines)\n", "| Heure (UTC) | Étape | Événement | Détail |",
+           "|---|---|---|---|"]
+    for e in audit:
+        stage = STAGE_NAMES.get(e["stage"], e["stage"]) + (f" {e['task_id']}" if e.get("task_id") else "")
+        if e["type"] == "contrôle":
+            n = {s: sum(1 for a in e["alerts"] if a["severity"] == s) for s in ("blocking", "warning", "info")}
+            detail = f"{n['blocking']} bloquante(s), {n['warning']} avertissement(s), {n['info']} info"
+            out.append(f"| {e['time']} | {stage} | 🛡️ contrôle | {detail} |")
+        else:
+            parts = []
+            if e.get("answers"):
+                parts.append("réponses " + ", ".join(e["answers"]))
+            if e.get("feedback"):
+                parts.append("correction : " + e["feedback"].replace("|", "/").replace("\n", " "))
+            if e.get("justification"):
+                parts.append("justification : " + e["justification"].replace("|", "/").replace("\n", " "))
+            if e.get("refused"):
+                parts.append("❌ refusée : " + e["refused"])
+            out.append(f"| {e['time']} | {stage} | 👤 {e['action']} | {'; '.join(parts) or '—'} |")
+    return "\n".join(out) + "\n"

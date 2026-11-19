@@ -103,6 +103,12 @@ def validate_spec(spec: Spec, sources: list[SourceStatement], min_grounding: flo
                 errs.append(f"{r.id}/CA{i}: termes non sourcés {sorted(unknown)}.")
         cited |= {c.source_id for ac in r.acceptance_criteria for c in ac.citations}
 
+    # Chaque réponse humaine (A-xxx) doit être reprise par une exigence : sinon elle est perdue.
+    for s in sources:
+        if s.origin == "answer" and s.id not in cited:
+            errs.append(f"La réponse humaine {s.id} (\"{s.text}\") n'est reprise par aucune exigence : "
+                        "cite-la dans l'exigence qu'elle précise (ou dans une contrainte).")
+
     for q in spec.open_questions:
         for sid in q.source_ids:
             if sid not in src:

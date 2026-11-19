@@ -75,7 +75,7 @@ def test_generate_stops_immediately_on_api_error():
     from langchain_core.exceptions import ModelNotFoundError
     from langchain_core.runnables import RunnableLambda
 
-    from sdd.graph import generate
+    from sdd.llm import generate
 
     calls = []
 
