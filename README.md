@@ -43,12 +43,31 @@ Par défaut **Groq + `openai/gpt-oss-120b`** (gratuit, rapide, sortie JSON Schem
 
 ## Démarrage
 
+Python **3.11 à 3.13** (sur macOS, si `python3` est en 3.14+ : `brew install python@3.13`).
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"          # + ".[ollama]" ou ".[gemini]" si besoin
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,ui]"        # + ",ollama" ou ",gemini" si besoin
 cp .env.example .env              # renseigner GROQ_API_KEY
+```
+
+### Interface web locale (recommandé)
+
+```bash
+sdd-ui                            # ouvre http://localhost:8501
+```
+
+Collez un brief (et une constitution facultative), lancez : chaque étape s'affiche au fil de l'eau, et à chaque
+point de contrôle (clarify, plan, analyze, implement, verify) vous **approuvez**, **révisez** (réponses aux
+questions + retour libre, qui deviennent des sources citables) ou **arrêtez**. Les artefacts et le code générés
+sont visibles dans l'onglet « Fichiers générés », téléchargeables en zip, et écrits dans `out/ui/<session>/`.
+L'interface ne parle jamais au modèle elle-même : elle passe par le même graphe et les mêmes validateurs que la CLI.
+
+### Ligne de commande
+
+```bash
 sdd examples/brief.md --constitution examples/constitution.md --require-tests
-pytest                            # 14 tests hors ligne avec un faux LLM
+pytest                            # 17 tests hors ligne avec un faux LLM
 ```
 
 Le code généré est exécuté par pytest : à lancer de préférence dans un environnement isolé.
