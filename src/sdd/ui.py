@@ -43,8 +43,10 @@ def _graph(thread: str, max_retries: int, require_tests: bool):
     """Un graphe par session, avec son checkpointer SQLite (reprise possible, comme la CLI)."""
     import streamlit as st
 
+    from sdd.llm import fallback_name, model_name, provider
+
     @st.cache_resource(show_spinner=False)
-    def build(thread: str, max_retries: int, require_tests: bool):
+    def build(thread: str, max_retries: int, require_tests: bool, _llm_key: tuple):
         from langgraph.checkpoint.sqlite import SqliteSaver
 
         from sdd.graph import build_graph
@@ -56,7 +58,8 @@ def _graph(thread: str, max_retries: int, require_tests: bool):
         return build_graph(get_llm(), out, max_retries, checkpointer=saver, require_tests=require_tests,
                            fallback_llm=get_fallback_llm())
 
-    return build(thread, max_retries, require_tests)
+    # le graphe est reconstruit si l'on change de fournisseur ou de modèle
+    return build(thread, max_retries, require_tests, (provider(), model_name(), fallback_name()))
 
 
 def _cfg(thread: str) -> dict:
@@ -81,7 +84,7 @@ def render() -> None:
 
     from sdd.runner import NODE_TO_STEP, STAGE_TITLES, STEPS, advance, summarize
 
-    load_dotenv()
+    st.cache_resource(load_dotenv)()  # une seule fois par processus : les choix de la barre latérale priment ensuite
     st.set_page_config(page_title="SDD Pipeline", page_icon="📐", layout="wide")
     ss = st.session_state
     ss.setdefault("thread", None)
@@ -93,12 +96,29 @@ def render() -> None:
     # ------------------------------ barre latérale ------------------------------
     with st.sidebar:
         st.header("Configuration")
-        provider = os.getenv("SDD_PROVIDER", "groq").lower()
-        from sdd.llm import DEFAULTS, FALLBACKS
+        from sdd.llm import API_KEYS, DEFAULTS, PROVIDERS, fallback_name, ollama_models, provider
 
-        st.caption(f"Fournisseur : **{provider}**  \nModèle : **{os.getenv('SDD_MODEL', DEFAULTS.get(provider, '?'))}**  \n"
-                   f"Secours : **{os.getenv('SDD_FALLBACK_MODEL', FALLBACKS.get(provider, '')) or 'aucun'}**")
-        key_var = {"groq": "GROQ_API_KEY", "gemini": "GOOGLE_API_KEY"}.get(provider)
+        prov = st.selectbox("Fournisseur", PROVIDERS, index=PROVIDERS.index(provider()) if provider() in PROVIDERS else 0,
+                            help="ollama : 100 % local et sans quota. groq / gemini : API en ligne gratuite avec quotas.")
+        if prov != provider():  # changement de fournisseur : on repart de son modèle par défaut
+            os.environ.pop("SDD_MODEL", None)
+            os.environ.pop("SDD_FALLBACK_MODEL", None)
+        os.environ["SDD_PROVIDER"] = prov
+        model = st.text_input("Modèle", value=os.getenv("SDD_MODEL") or DEFAULTS[prov], key=f"model_{prov}").strip()
+        os.environ["SDD_MODEL"] = model
+        if fallback_name():
+            st.caption(f"Modèle de secours : **{fallback_name()}**")
+        if prov == "ollama":
+            pulled = ollama_models()
+            if pulled is None:
+                st.error("Ollama ne répond pas. Ouvrez l'application Ollama (ou lancez `ollama serve`).")
+            elif model not in pulled and f"{model}:latest" not in pulled:
+                st.warning(f"Modèle absent. Dans un terminal : `ollama pull {model}`")
+                if pulled:
+                    st.caption("Modèles disponibles : " + ", ".join(pulled))
+            else:
+                st.caption("✅ Ollama prêt, modèle disponible localement.")
+        key_var = API_KEYS.get(prov)
         if key_var and not os.getenv(key_var):
             st.warning(f"{key_var} absente du fichier .env")
             key = st.text_input(f"{key_var} (gardée en mémoire, jamais écrite sur disque)", type="password")

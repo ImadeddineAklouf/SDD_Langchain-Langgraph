@@ -124,11 +124,11 @@ Un *chat model* est un objet qui représente un LLM conversationnel. Tous les fo
 Google, Ollama…) exposent la même interface : `invoke(messages)` renvoie un message de réponse. Dans le projet :
 
 ```python
-from langchain_groq import ChatGroq
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0, max_retries=2)
+from langchain_ollama import ChatOllama
+llm = ChatOllama(model="qwen3:14b", temperature=0, seed=42, num_ctx=16384)
 ```
 
-Changer de fournisseur revient à changer de classe (`ChatOllama`, `ChatGoogleGenerativeAI`) : le reste du code
+Changer de fournisseur revient à changer de classe (`ChatGroq`, `ChatGoogleGenerativeAI`) : le reste du code
 ne bouge pas. C'est tout l'intérêt de l'abstraction, et c'est ce que fait `src/sdd/llm.py`.
 
 **`temperature=0`** demande au modèle de choisir systématiquement le mot le plus probable : c'est le réglage le
@@ -546,12 +546,38 @@ Le tier gratuit de Groq limite notamment le nombre de **tokens par jour et par m
 propre quota), branché avec le mécanisme standard `with_fallbacks` (chapitre 3.7). Le secours est plus petit,
 donc un peu moins fiable, mais il est soumis aux mêmes schémas et aux mêmes validateurs.
 
-## 9.4 Les alternatives (changement par simple variable d'environnement)
+## 9.4 Le passage au local : Ollama par défaut
+
+À l'usage, le quota journalier de Groq est atteint en une ou deux exécutions complètes : un travail itératif
+(réviser, relancer) devient impossible. Le fournisseur par défaut est donc devenu **Ollama**, qui fait tourner
+le modèle sur la machine (sur un Mac Apple Silicon, la mémoire unifiée sert de mémoire GPU).
+
+- **Modèle par défaut : `qwen3:14b`** (environ 9 Go). Il tient sur un Mac de 16 Go, suit bien les consignes et
+  gère correctement les sorties structurées. Alternative : `gpt-oss:20b` (environ 14 Go), de la même famille que
+  le modèle utilisé sur Groq.
+- **Sortie structurée** : avec `method="json_schema"`, `ChatOllama.with_structured_output` transmet le JSON
+  Schema du modèle Pydantic dans le paramètre `format` d'Ollama. La génération est alors **contrainte** token par
+  token : le modèle ne peut pas produire autre chose qu'un JSON conforme. C'est la même garantie qu'avec Groq ;
+  un test le vérifie (`test_ollama_structured_output_constrains_format_to_schema`).
+- **Taille du contexte (`num_ctx`)** : par défaut, Ollama utilise un contexte court et **tronque l'entrée sans
+  erreur** quand elle le dépasse. Or l'étape `implement` envoie tout le code déjà écrit. Le pipeline fixe donc
+  `num_ctx=16384` (réglable avec `SDD_NUM_CTX`).
+- **Pas de modèle de secours** : il n'y a pas de quota en local, donc rien à basculer.
+- **Contreparties** : plus lent qu'une API (compter quelques dizaines de secondes à quelques minutes par étape
+  selon la machine), et un modèle de 14 milliards de paramètres se trompe plus souvent qu'un modèle de 120
+  milliards. Ce n'est pas un problème de sûreté : les validateurs rejettent les sorties fautives et la boucle de
+  correction redemande ; au pire, l'erreur est montrée au point de contrôle humain.
+
+Dans l'interface web, la barre latérale permet de choisir le fournisseur et le modèle, et vérifie qu'Ollama
+répond et que le modèle est téléchargé (sinon elle affiche la commande `ollama pull` à lancer). En ligne de
+commande : `--provider` et `--model`.
+
+## 9.5 Récapitulatif des fournisseurs
 
 | `SDD_PROVIDER` | Modèle par défaut | Avantages | Inconvénients |
 |---|---|---|---|
-| `groq` (défaut) | `openai/gpt-oss-120b` | gratuit, très rapide, gros modèle | quotas, données envoyées à un tiers |
-| `ollama` | `qwen2.5:14b` | 100 % local, hors ligne, privé | lent sans GPU, moins fiable sur les gros schémas |
+| `ollama` (défaut) | `qwen3:14b` | 100 % local, hors ligne, privé, sans quota | plus lent, modèle plus petit |
+| `groq` | `openai/gpt-oss-120b` | gratuit, très rapide, gros modèle | quotas journaliers, données envoyées à un tiers |
 | `gemini` | `gemini-2.5-flash` | quota gratuit généreux, gros contexte | données du tier gratuit utilisables pour l'entraînement |
 
 Le modèle exact se règle avec `SDD_MODEL` ; la méthode de sortie structurée avec `SDD_STRUCTURED_METHOD`. La
@@ -589,7 +615,8 @@ sdd-pipeline/
 │   └── ui.py               interface web locale (Streamlit)
 └── tests/
     ├── test_pipeline.py    tests hors ligne du pipeline
-    └── test_ui.py          tests hors ligne de l'interface
+    ├── test_ui.py          tests hors ligne de l'interface
+    └── test_llm.py         fabrique de modèle (Ollama par défaut)
 ```
 
 ## 10.2 `models.py`
@@ -613,8 +640,9 @@ mot, respecter le schéma, ne jamais répondre en texte libre, rédiger en fran�
 
 ## 10.5 `llm.py`
 
-`get_llm()` lit `SDD_PROVIDER` et `SDD_MODEL` et instancie le bon chat model, toujours avec `temperature=0`
-(et un `seed` quand le fournisseur le permet). Les imports sont faits à l'intérieur de la fonction : on
+`get_llm()` lit `SDD_PROVIDER` (défaut `ollama`) et `SDD_MODEL` et instancie le bon chat model, toujours avec
+`temperature=0` (et un `seed` quand le fournisseur le permet ; `num_ctx` pour Ollama). `ollama_models()` liste
+les modèles téléchargés localement, pour que l'interface puisse prévenir s'il en manque un. Les imports sont faits à l'intérieur de la fonction : on
 n'installe que le paquet du fournisseur utilisé. `structured_method()` renvoie la méthode de sortie structurée.
 
 ## 10.6 `validators.py`
@@ -705,11 +733,15 @@ l'avance, schéma par schéma. Il s'insère dans la chaîne LCEL exactement comm
 | `test_constitution_rule_cannot_be_functional` | une règle de constitution classée `functional` est rejetée |
 | `test_every_graph_node_maps_to_a_speckit_step` | chaque nœud du graphe est rattaché à une des 7 étapes affichées par l'UI |
 | `test_runner_stops_at_each_checkpoint_and_reports_nodes` | `advance`/`resume` s'arrêtent à chaque point de contrôle et signalent chaque nœud |
+| `test_ollama_is_default_local_provider` | Ollama est le fournisseur par défaut, température 0, seed, contexte 16 384, pas de secours |
+| `test_ollama_structured_output_constrains_format_to_schema` | le JSON Schema Pydantic est bien transmis à Ollama (`format`) |
+| `test_provider_and_model_from_env` | Groq et le modèle Ollama restent sélectionnables par variables d'environnement |
+| `test_ollama_models_returns_none_when_server_down` | serveur Ollama absent : pas de plantage, l'UI peut prévenir |
 | `test_streamlit_app_runs_full_workflow` | l'application Streamlit elle-même (via `AppTest`) : saisie du brief, 6 approbations, fichiers écrits |
 
 Un exemple complet de sortie réelle est fourni dans `examples/sortie-exemple/`.
 
-Commande : `pytest` (17 tests, environ 4 secondes).
+Commande : `pytest` (21 tests, environ 6 secondes).
 
 # 12. Exécution réelle et enseignements
 
@@ -766,8 +798,15 @@ de test. Formellement, l'exigence était couverte. → Option `--require-tests` 
 ```bash
 cd sdd-pipeline
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,ui]"         # ajouter ",ollama" ou ",gemini" si besoin
-cp .env.example .env               # puis renseigner GROQ_API_KEY
+pip install -e ".[dev,ui]"         # ajouter ",gemini" si besoin
+cp .env.example .env               # rien à renseigner pour Ollama
+```
+
+Pour le modèle local (défaut), installer Ollama et télécharger le modèle une fois :
+
+```bash
+brew install ollama && brew services start ollama   # ou l'application Ollama
+ollama pull qwen3:14b
 ```
 
 **Version de Python** : le projet accepte Python 3.11 à 3.13 (`requires-python = ">=3.11,<3.14"`). Avec une
@@ -775,7 +814,7 @@ version plus récente (par exemple 3.15, installée par défaut par Homebrew sur
 indirecte (`zstandard`) doit être compilée et l'installation échoue. Sur macOS : `brew install python@3.13`, puis
 créer l'environnement avec `python3.13` comme ci-dessus.
 
-La clé Groq se crée gratuitement sur la console Groq. Le fichier `.env` est exclu de git par `.gitignore` : ne
+Pour utiliser Groq à la place, la clé se crée gratuitement sur la console Groq. Le fichier `.env` est exclu de git par `.gitignore` : ne
 jamais mettre la clé dans le code.
 
 ## 13.2 Lancer un projet
@@ -813,7 +852,7 @@ sdd-ui          # ouvre http://localhost:8501 dans le navigateur
 4. L'onglet « Fichiers générés » montre tous les artefacts et le code du workspace ; un bouton télécharge le tout
    en `.zip`. Les fichiers sont aussi sur disque dans `out/ui/<session>/`.
 
-Si la clé API est absente du `.env`, la barre latérale permet de la saisir : elle reste en mémoire et n'est
+La barre latérale permet de choisir le fournisseur (Ollama par défaut) et le modèle ; pour Ollama, elle indique si le serveur répond et si le modèle est téléchargé. Avec Groq ou Gemini, si la clé API est absente du `.env`, elle permet de la saisir : elle reste en mémoire et n'est
 jamais écrite sur disque. En cas d'erreur (quota, réseau), un bouton reprend le workflow au dernier checkpoint ;
 une session peut aussi être reprise plus tard avec son identifiant.
 
@@ -832,8 +871,9 @@ sdd examples/brief.md --out out --thread <identifiant>
 | `--max-retries` | nombre de corrections automatiques par étape (3) |
 | `--require-tests` | chaque exigence fonctionnelle doit avoir une tâche qui écrit un test |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
-| `SDD_PROVIDER` | `groq`, `ollama`, `gemini` |
-| `SDD_MODEL` | nom du modèle |
+| `--provider` / `SDD_PROVIDER` | `ollama` (défaut), `groq`, `gemini` |
+| `--model` / `SDD_MODEL` | nom du modèle |
+| `SDD_NUM_CTX` | contexte Ollama en tokens (16384) |
 | `SDD_STRUCTURED_METHOD` | `json_schema`, `function_calling`, `json_mode` |
 | `SDD_UI_OUT` | dossier de sortie de l'interface web (`out/ui`) |
 
@@ -858,7 +898,7 @@ sdd examples/brief.md --out out --thread <identifiant>
   que le plan a un point de contrôle humain.
 - Le code généré est exécuté (pytest) sur la machine : à faire tourner dans un environnement isolé (conteneur)
   pour un usage sérieux.
-- Le tier gratuit de Groq a des quotas : un gros projet peut les atteindre.
+- En local, un modèle de 14 milliards de paramètres est plus lent et se trompe plus souvent : plus de tours de correction. Avec Groq, les quotas gratuits limitent le nombre d'exécutions par jour.
 - Température 0 ne garantit pas une sortie identique d'un appel à l'autre ; ce sont les règles d'acceptation qui sont déterministes.
 
 **Évolutions possibles**
@@ -895,6 +935,7 @@ sdd examples/brief.md --out out --thread <identifiant>
 | **Tri topologique** | ordre qui respecte les dépendances entre tâches |
 | **Température** | paramètre de créativité d'un LLM (0 = le plus déterministe) |
 | **Groq** | fournisseur d'inférence rapide avec API gratuite |
+| **Ollama** | logiciel qui télécharge et exécute des LLM à poids ouverts sur sa propre machine |
 
 # Annexe : code source complet
 
