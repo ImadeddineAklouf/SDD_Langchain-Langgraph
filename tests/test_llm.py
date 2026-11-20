@@ -7,7 +7,7 @@ from sdd.models import Spec
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for v in ("SDD_PROVIDER", "SDD_MODEL", "SDD_FALLBACK_MODEL", "SDD_NUM_CTX"):
+    for v in ("SDD_PROVIDER", "SDD_MODEL", "SDD_FALLBACK_MODEL", "SDD_FALLBACK_PROVIDER", "SDD_NUM_CTX"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "test")
     monkeypatch.setenv("GROQ_API_KEY", "test")
@@ -19,7 +19,7 @@ def test_gemini_is_default_provider(monkeypatch):
     m = llm.get_llm()
     assert isinstance(m, ChatGoogleGenerativeAI)
     assert (m.model, m.temperature, m.seed) == ("gemini-3.8-flash", 0, 42)
-    assert llm.get_fallback_llm() is None  # modèles ouverts variables selon le compte : secours au choix
+    assert llm.fallback_label() == "groq/openai/gpt-oss-120b"  # clé Groq présente : secours chez Groq
     monkeypatch.setenv("SDD_FALLBACK_MODEL", "gemini-3.8-flash-lite")
     assert llm.get_fallback_llm().model == "gemini-3.8-flash-lite"
 
@@ -89,3 +89,43 @@ def test_generate_stops_immediately_on_api_error():
     with pytest.raises(ModelNotFoundError):
         generate(DownLLM(), Spec, "sys", "payload", lambda s: [], max_retries=3)
     assert len(calls) == 1  # pas de 3 relances inutiles, pas de « Sortie non conforme au schéma »
+
+
+def test_gemini_call_has_timeout_and_short_thinking(monkeypatch):
+    """Un appel ne peut jamais bloquer indéfiniment (écran figé sur la première étape)."""
+    m = llm.get_llm()
+    assert m.timeout == 120 and m.max_retries == 3
+    assert m.thinking_config == {"thinking_level": "low"}
+    monkeypatch.setenv("SDD_TIMEOUT", "30")
+    monkeypatch.setenv("SDD_THINKING", "high")
+    m = llm.get_llm()
+    assert m.timeout == 30 and m.thinking_config == {"thinking_level": "high"}
+    assert llm.get_llm("gemini-2.5-flash").thinking_config is None  # thinking_level : Gemini 3 seulement
+
+
+def test_timeout_stops_the_step_with_a_clear_message():
+    class ReadTimeout(Exception):
+        pass
+
+    exc = ReadTimeout("timed out")
+    assert llm.is_api_error(exc)  # pas de 4 relances de 2 minutes chacune
+    assert "n'a pas répondu dans le délai" in llm.explain_error(exc)
+
+
+def test_secours_chez_l_autre_fournisseur(monkeypatch):
+    """Clé Groq présente et aucun secours fixé : Gemini bascule sur Groq en cas de panne ou de lenteur."""
+    from sdd import llm
+
+    for var in ("SDD_FALLBACK_MODEL", "SDD_FALLBACK_PROVIDER", "SDD_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SDD_PROVIDER", "gemini")
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    assert llm.fallback_provider() == "groq"
+    assert llm.fallback_label() == "groq/" + llm.DEFAULTS["groq"]
+    fb = llm.get_fallback_llm()
+    assert type(fb).__name__ == "ChatGroq" and fb.request_timeout == llm.llm_timeout()
+    monkeypatch.setenv("SDD_FALLBACK_MODEL", "")  # désactivation explicite
+    assert llm.fallback_label() == "" and llm.get_fallback_llm() is None
+    monkeypatch.delenv("SDD_FALLBACK_MODEL")
+    monkeypatch.delenv("GROQ_API_KEY")
+    assert llm.fallback_provider() == "gemini" and llm.get_fallback_llm() is None

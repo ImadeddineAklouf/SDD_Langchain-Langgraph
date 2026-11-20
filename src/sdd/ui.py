@@ -43,7 +43,7 @@ def _graph(thread: str, max_retries: int, require_tests: bool, factory: bool):
     """Un graphe par session, avec son checkpointer SQLite (reprise possible, comme la CLI)."""
     import streamlit as st
 
-    from sdd.llm import fallback_name, guardian_name, guardian_semantic_enabled, model_name, provider
+    from sdd.llm import fallback_label, guardian_name, guardian_semantic_enabled, model_name, provider
 
     @st.cache_resource(show_spinner=False)
     def build(thread: str, max_retries: int, require_tests: bool, factory: bool, _llm_key: tuple):
@@ -60,7 +60,7 @@ def _graph(thread: str, max_retries: int, require_tests: bool, factory: bool):
                            checkpoints=() if factory else SUPERVISED)
 
     # le graphe est reconstruit si l'on change de fournisseur, de modèle ou de réglage du Gardien
-    key = (provider(), model_name(), fallback_name(), guardian_name(), guardian_semantic_enabled())
+    key = (provider(), model_name(), fallback_label(), guardian_name(), guardian_semantic_enabled())
     return build(thread, max_retries, require_tests, factory, key)
 
 
@@ -87,6 +87,9 @@ def render() -> None:
     from sdd.runner import NODE_TO_STEP, STAGE_TITLES, STEPS, advance, summarize
 
     st.cache_resource(load_dotenv)()  # une seule fois par processus : les choix de la barre latérale priment ensuite
+    from sdd.llm import setup_logging
+
+    setup_logging()  # chaque appel au modèle est tracé dans le terminal qui a lancé sdd-ui
     st.set_page_config(page_title="SDD Pipeline", page_icon="📐", layout="wide")
     ss = st.session_state
     ss.setdefault("thread", None)
@@ -98,13 +101,14 @@ def render() -> None:
     # ------------------------------ barre latérale ------------------------------
     with st.sidebar:
         st.header("Configuration")
-        from sdd.llm import API_KEYS, DEFAULTS, PROVIDERS, fallback_name, gemini_models, ollama_models, provider
+        from sdd.llm import API_KEYS, DEFAULTS, PROVIDERS, fallback_label, gemini_models, ollama_models, provider
 
         prov = st.selectbox("Fournisseur", PROVIDERS, index=PROVIDERS.index(provider()) if provider() in PROVIDERS else 0,
                             help="gemini / groq : API en ligne gratuites (avec quotas). ollama : LLM local, à installer soi-même.")
         if prov != provider():  # changement de fournisseur : on repart de son modèle par défaut
             os.environ.pop("SDD_MODEL", None)
             os.environ.pop("SDD_FALLBACK_MODEL", None)
+            os.environ.pop("SDD_FALLBACK_PROVIDER", None)
         os.environ["SDD_PROVIDER"] = prov
         wanted = os.getenv("SDD_MODEL") or DEFAULTS[prov]
         available = st.cache_data(ttl=600, show_spinner=False)(lambda _key: gemini_models())(
@@ -114,14 +118,21 @@ def render() -> None:
                 st.warning(f"`{wanted}` n'est pas disponible pour votre clé : choisissez un modèle ci-dessous.")
                 wanted = DEFAULTS[prov] if DEFAULTS[prov] in available else available[0]
             model = st.selectbox("Modèle", available, index=available.index(wanted), key=f"model_{prov}_list")
-            fb_options = ["(aucun)"] + [m for m in available if m != model]
-            fb = fallback_name() if fallback_name() in fb_options else "(aucun)"
-            fb = st.selectbox("Modèle de secours (si quota atteint)", fb_options, index=fb_options.index(fb))
-            os.environ["SDD_FALLBACK_MODEL"] = "" if fb == "(aucun)" else fb
+            # secours chez l'autre fournisseur cloud (clé présente) : proposé en premier, c'est le plus robuste
+            cross = [f"groq/{DEFAULTS['groq']}"] if prov == "gemini" and os.getenv(API_KEYS["groq"]) else []
+            fb_options = ["(aucun)"] + cross + [m for m in available if m != model]
+            current = fallback_label()
+            fb = current if current in fb_options else (cross[0] if cross else "(aucun)")
+            fb = st.selectbox("Modèle de secours (panne, lenteur, quota)", fb_options, index=fb_options.index(fb))
+            if fb in cross:
+                os.environ["SDD_FALLBACK_PROVIDER"], os.environ["SDD_FALLBACK_MODEL"] = fb.split("/", 1)
+            else:
+                os.environ.pop("SDD_FALLBACK_PROVIDER", None)
+                os.environ["SDD_FALLBACK_MODEL"] = "" if fb == "(aucun)" else fb
         else:
             model = st.text_input("Modèle", value=wanted, key=f"model_{prov}").strip()
-            if fallback_name():
-                st.caption(f"Modèle de secours : **{fallback_name()}**")
+            if fallback_label():
+                st.caption(f"Modèle de secours : **{fallback_label()}**")
         os.environ["SDD_MODEL"] = model
         if prov == "ollama":
             pulled = ollama_models()
@@ -185,24 +196,39 @@ def render() -> None:
         st.error(ss.error)
 
     # Avancement des 7 étapes
-    reached = {NODE_TO_STEP.get(n) for n, _ in ss.log}
-    cols = st.columns(len(STEPS))
-    current = NODE_TO_STEP.get(ss.log[-1][0]) if ss.log else None
-    for col, (key, label) in zip(cols, STEPS):
-        icon = "✅" if key in reached and (key != current or ss.finished) else ("⏳" if key == current else "○")
-        col.markdown(f"**{icon} {label}**")
+    steps_box = st.empty()
+
+    def draw_steps(running: bool = False) -> None:
+        """Rangée des étapes, redessinée à chaque nœud terminé : elle avance en direct pendant un run."""
+        reached = {NODE_TO_STEP.get(n) for n, _ in ss.log}
+        current = NODE_TO_STEP.get(ss.log[-1][0]) if ss.log else None
+        with steps_box.container():
+            cols = st.columns(len(STEPS))
+            for col, (key, label) in zip(cols, STEPS):
+                done = key in reached and (key != current or ss.finished or running)
+                icon = "✅" if done else ("⏳" if key == current else "○")
+                col.markdown(f"**{icon} {label}**")
+
+    draw_steps()
 
     def on_update(container):
         def cb(node: str, update: dict) -> None:
             ss.log.append((node, summarize(node, update)))
             container.write(f"✔︎ **{node}** — {ss.log[-1][1]}")
+            draw_steps(running=True)
         return cb
 
     def run(inp, label: str) -> None:
         graph = _graph(ss.thread, max_retries, require_tests, factory)
         with st.status(label, expanded=True) as status:
+            live = status.empty()  # progression en direct : appel au modèle en cours, durée, validation
+
+            def on_progress(msg: str) -> None:
+                live.caption("⏳ " + msg)
+
             try:
-                ss.pending = advance(graph, inp, _cfg(ss.thread), on_update(status))
+                ss.pending = advance(graph, inp, _cfg(ss.thread), on_update(status), on_progress)
+                live.empty()
                 ss.finished = ss.pending is None
                 ss.error = None
                 status.update(label="Point de contrôle : à vous de décider" if ss.pending else "Workflow terminé", state="complete")

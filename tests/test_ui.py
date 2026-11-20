@@ -46,6 +46,12 @@ def test_runner_reports_nodes_and_guardian_pauses(tmp_path):
         stages.append(pending and pending["stage"])
     assert stages == ["spec", "plan", "analyze", "impl", "impl", "verify", None]
     assert ("verify", "aucun test à lancer") in seen
+    progress = []
+    g2 = build_graph(scripted_llm(), tmp_path / "p", checkpointer=MemorySaver())
+    advance(g2, {"brief": BRIEF, "constitution": CONSTITUTION}, {"configurable": {"thread_id": "p"}},
+            on_progress=progress.append)
+    assert progress[0] == "Spec : appel au modèle (essai 1/4)…"  # progression en direct pendant un nœud
+    assert any(p.startswith("Spec : réponse en") for p in progress)
     assert ("gate", "décision humaine : continuer") in seen
     assert (tmp_path / "workspace/todo/cli.py").exists()
 

@@ -90,13 +90,19 @@ def summarize(node: str, update: dict[str, Any] | None) -> str:
     return ""
 
 
-def advance(graph, inp, cfg: dict, on_update: Callable[[str, dict], None] | None = None) -> dict | None:
+def advance(graph, inp, cfg: dict, on_update: Callable[[str, dict], None] | None = None,
+            on_progress: Callable[[str], None] | None = None) -> dict | None:
     """Exécute jusqu'au prochain interrupt. Renvoie sa charge utile, ou None si le graphe est terminé.
 
     `inp` vaut l'entrée initiale ({brief, constitution}), un `Command(resume=...)`, ou None pour
-    reprendre une session existante depuis son checkpoint.
+    reprendre une session existante depuis son checkpoint. Deux flux standard de LangGraph :
+    « updates » (un nœud vient de finir) et « custom » (progression pendant un nœud : appels au modèle).
     """
-    for chunk in graph.stream(inp, cfg, stream_mode="updates"):
+    for mode, chunk in graph.stream(inp, cfg, stream_mode=["updates", "custom"]):
+        if mode == "custom":
+            if on_progress and isinstance(chunk, dict) and "progress" in chunk:
+                on_progress(chunk["progress"])
+            continue
         for node, update in chunk.items():
             if node != "__interrupt__" and on_update:
                 on_update(node, update or {})
@@ -104,6 +110,6 @@ def advance(graph, inp, cfg: dict, on_update: Callable[[str, dict], None] | None
     return snap.interrupts[0].value if snap.interrupts else None
 
 
-def resume(graph, cfg: dict, review: dict, on_update=None) -> dict | None:
+def resume(graph, cfg: dict, review: dict, on_update=None, on_progress=None) -> dict | None:
     """Transmet la décision humaine (continue / answer / correct / accept_risk / abort) à la porte du Gardien."""
-    return advance(graph, Command(resume=review), cfg, on_update)
+    return advance(graph, Command(resume=review), cfg, on_update, on_progress)
