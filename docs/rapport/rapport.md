@@ -519,6 +519,23 @@ ne se perd : **une question déjà répondue n'est jamais reposée** (liste `ans
 réponse ne disparaît jamais d'elle-même**, même si le LLM oublie de la reposer. Seule une réponse, ou une
 acceptation explicite du risque, la fait sortir du chemin.
 
+Un essai réel (brief « dépenses ») a montré qu'il fallait aller plus loin : à chaque série, le modèle reposait,
+**reformulé**, ce qui venait d'être répondu (« Quel ordre de tri ? » devenait « Quel ordre de tri, croissant ou
+décroissant, et quel critère de désambiguïsation ? »), et trouvait toujours un détail de plus à demander. La
+clarification ne finissait jamais. Trois garde-fous complètent donc la fusion :
+
+- **Le modèle voit ce qui est déjà répondu.** Les prompts de `specify` et `clarify` reçoivent un bloc
+  « DÉJÀ RÉPONDU » avec chaque question posée et la réponse humaine (sources `A-xxx`), et la consigne de ne
+  reposer aucune de ces questions, même reformulée.
+- **Filtre déterministe des reformulations** (`same_question`) : deux questions sont jugées identiques si l'une
+  contient l'autre (au moins 3 mots porteurs de sens communs, 80 %) ou si leur indice de Jaccard atteint 0,5
+  (mots tronqués à 6 lettres, mots interrogatifs ignorés). Une nouvelle question proche d'une question répondue
+  est écartée.
+- **Plafond de séries de questions** (`SDD_CLARIFY_ROUNDS`, 2 par défaut) : au-delà, le modèle n'est plus
+  interrogé pour de nouvelles questions. Les questions encore sans réponse restent bloquantes ; les nouvelles
+  questions écartées sont tracées dans `audit.md` (« ⏹️ questions non posées »), pour que rien ne disparaisse
+  en silence.
+
 Le nœud écrit `spec.md` / `spec.json` puis passe la main au Gardien (étape `spec`).
 
 ## 7.4 `plan` (LLM)
@@ -1267,7 +1284,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**48 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**49 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1357,7 +1374,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 48 tests hors ligne, sans clé
+python -m pytest                   # 49 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 
@@ -1424,6 +1441,7 @@ Reprendre une session : `sdd examples/brief.md --out out --thread <identifiant>`
 | `--model` / `SDD_MODEL` | nom du modèle |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
 | `SDD_FALLBACK_PROVIDER` | fournisseur du secours (défaut pour Gemini : `groq` si `GROQ_API_KEY` est présente) |
+| `SDD_CLARIFY_ROUNDS` | nombre maximal de séries de questions de clarification (2) |
 | `SDD_TIMEOUT` | délai maximal d'un appel au modèle, essais compris, garanti côté Python (120 s) |
 | `SDD_THINKING` | réflexion des modèles Gemini 3 : `minimal`, `low` (défaut), `medium`, `high` |
 | `SDD_NUM_CTX` | contexte Ollama en tokens (16384) |

@@ -394,3 +394,44 @@ def test_constitution_rule_cannot_be_functional():
         {"id": "REQ-003", "kind": "functional", "statement": "Le code est écrit en Python 3.11.",
          "citations": [cite("C-001", "Le code est écrit en Python 3.11.")]}]})
     assert any("REQ-003" in e and "constitution" in e for e in validate_spec(spec, sources()))
+
+
+def test_clarify_never_reasks_answered_questions_and_stops_after_round_cap(tmp_path):
+    """Boucle réelle (test « dépenses ») : chaque série redemandait, reformulé, ce qui était déjà répondu."""
+    from sdd.graph import same_question
+
+    def spec_with(*answers, questions=()):
+        d = GOOD_SPEC.model_dump()
+        for aid, quote in answers:
+            d["requirements"][0]["citations"].append(cite(aid, quote))
+        d["open_questions"] = [{"id": f"Q-{i:03d}", "question": q, "source_ids": ["B-001"]}
+                               for i, q in enumerate(questions, 1)]
+        return Spec.model_validate(d)
+
+    def clar(*qs):
+        return Clarifications(questions=[{"id": f"Q-{i:03d}", "question": q, "source_ids": ["B-001"]}
+                                         for i, q in enumerate(qs, 1)])
+
+    tri = "Quel ordre de tri doit être appliqué à la liste des tâches ?"
+    tri_bis = "Quel ordre de tri (croissant ou décroissant) doit être appliqué lors de l'affichage de la liste des tâches ?"
+    assert same_question(tri, tri_bis) and not same_question("Quel format de date ?", "Quel format de sortie JSON ?")
+    llm = FakeLLM({
+        "Spec": [GOOD_SPEC, spec_with(("A-001", "Réponse : croissant")),
+                 spec_with(("A-001", "Réponse : croissant"), ("A-002", "Réponse : 100"),
+                           questions=["Quelle couleur pour les tâches urgentes ?"])],
+        "Clarifications": [clar(tri), clar(tri_bis, "Combien de tâches au maximum ?")],
+    })
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver(), checkpoints=("spec",))
+    cfg = {"configurable": {"thread_id": "t"}}
+    res, pause = run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    assert [q["question"] for q in pause["open_questions"]] == [tri]
+    res, pause = run_until_pause(g, Command(resume={"action": "answer", "answers": {"Q-001": "croissant"}}), cfg)
+    # la reformulation de la question répondue est écartée ; seule la vraie nouvelle question reste
+    assert [q["question"] for q in pause["open_questions"]] == ["Combien de tâches au maximum ?"]
+    res, pause = run_until_pause(g, Command(resume={"action": "answer", "answers": {"Q-001": "100"}}), cfg)
+    # plafond de 2 séries atteint : le modèle n'est plus interrogé, la nouvelle question n'est pas posée (tracée)
+    assert pause["kind"] == "checkpoint" and pause["open_questions"] == []
+    assert llm.calls["Clarifications"] == 2
+    assert any(e["type"] == "plafond" and "couleur" in e["justification"] for e in res["audit"])
+    payload_sources = [s["id"] for s in res["sources"] if s["origin"] == "answer"]
+    assert payload_sources == ["A-001", "A-002"]

@@ -86,6 +86,7 @@ class SDDState(TypedDict, total=False):
     alerts: list[dict]         # rapport du dernier contrôle
     accepted: list[str]        # empreintes des alertes acceptées / acquittées par l'humain
     answered: list[str]        # questions déjà répondues (texte normalisé) : jamais reposées
+    clarify_rounds: int        # séries de questions déjà générées (plafonnées)
     redo: str                  # nœud à relancer après une réponse ou une correction
     gate_error: str | None     # décision humaine refusée (ex. accepter un risque sans justification)
     audit: Annotated[list[dict], operator.add]  # journal d'audit (réducteur : on ajoute, on n'efface jamais)
@@ -98,6 +99,42 @@ def _sources(state: SDDState) -> list[SourceStatement]:
 
 def _fmt_sources(state: SDDState) -> str:
     return "\n".join(f"[{s['id']}] ({s['origin']}) {s['text']}" for s in state["sources"])
+
+
+_QWORDS = {"quel", "quell", "comment", "doit", "doiven", "utilis", "progra", "faut", "etre", "attend", "lorsqu",
+           "faire", "quoi", "combie", "exacte", "exact"}
+
+
+def _qstems(text: str) -> set[str]:
+    from .validators import _tokens
+
+    return {w[:6] for w in _tokens(text)} - _QWORDS
+
+
+def same_question(a: str, b: str) -> bool:
+    """Deux questions disent-elles la même chose ? Filtre déterministe et prudent (mots porteurs de sens,
+    tronqués à 6 lettres) : l'une est contenue dans l'autre (≥ 3 mots communs, 80 %), ou Jaccard ≥ 0,5."""
+    A, B = _qstems(a), _qstems(b)
+    if not A or not B:
+        return False
+    common = len(A & B)
+    return common / len(A | B) >= 0.5 or (common >= 3 and common / min(len(A), len(B)) >= 0.8)
+
+
+def max_clarify_rounds() -> int:
+    """Nombre maximal de séries de questions (SDD_CLARIFY_ROUNDS, défaut 2) : au-delà, plus de nouvelles
+    questions, seulement celles qui restent sans réponse. Sans plafond, un modèle trouve toujours un détail
+    de plus à demander et la clarification ne finit jamais."""
+    return int(os.getenv("SDD_CLARIFY_ROUNDS", "2"))
+
+
+def _answered_block(state: SDDState) -> str:
+    done = [s for s in state["sources"] if s["origin"] == "answer"]
+    if not done:
+        return ""
+    return ("\n\nDÉJÀ RÉPONDU (questions posées à l'humain et ses réponses ; ne repose AUCUNE de ces questions, "
+            "même reformulée, ni une question dont la réponse s'en déduit) :\n"
+            + "\n".join(f"[{s['id']}] {s['text']}" for s in done))
 
 
 def _dump(obj) -> str:
@@ -173,7 +210,7 @@ def build_graph(
     def constitution(state: SDDState):
         srcs = split_statements(state.get("constitution", ""), "C", "constitution")
         return {"sources": [s.model_dump() for s in srcs], "current": 0, "written": [], "fix_attempts": 0,
-                "accepted": [], "answered": []}
+                "accepted": [], "answered": [], "clarify_rounds": 0}
 
     # ---------------- 2. specify ----------------
     def specify(state: SDDState):
@@ -185,7 +222,7 @@ def build_graph(
         render.write(out, "sources.json", _dump(state["sources"]))
         sources = _sources(state)
         spec, errs = gen(
-            llm, Spec, prompts.SPECIFY, "SOURCES :\n" + _fmt_sources(state),
+            llm, Spec, prompts.SPECIFY, "SOURCES :\n" + _fmt_sources(state) + _answered_block(state),
             lambda s: validate_spec(s, sources), max_retries,
         )
         return {**update, "spec": spec.model_dump(), "spec_errors": errs}
@@ -193,23 +230,51 @@ def build_graph(
     # ---------------- 3. clarify (LLM : questions seulement ; les réponses viennent de l'humain) ----------------
     def clarify(state: SDDState):
         sources = _sources(state)
-        payload = f"SOURCES :\n{_fmt_sources(state)}\n\nSPEC :\n{_dump(state['spec'])}"
-        c, _errs = gen(llm, Clarifications, prompts.CLARIFY, payload, lambda x: validate_clarify(x, sources), max_retries)
+        rounds = state.get("clarify_rounds", 0)
+        capped = rounds >= max_clarify_rounds()
+        new: list[dict] = list(state["spec"].get("open_questions", []))
+        if not capped:  # plafond atteint : on n'interroge plus le modèle pour de nouvelles questions
+            payload = (f"SOURCES :\n{_fmt_sources(state)}{_answered_block(state)}\n\n"
+                       f"SPEC :\n{_dump(state['spec'])}")
+            c, _errs = gen(llm, Clarifications, prompts.CLARIFY, payload, lambda x: validate_clarify(x, sources),
+                           max_retries)
+            new += [q.model_dump() for q in c.questions]
         # questions encore ouvertes du tour précédent + questions de la spec + questions de clarification,
-        # renumérotées de façon stable. Règles déterministes : une question déjà répondue n'est jamais
-        # reposée, et une question sans réponse ne disparaît jamais d'elle-même (seule une réponse ou une
-        # acceptation de risque explicite la fait sortir du chemin).
+        # renumérotées de façon stable. Règles déterministes :
+        # - une question déjà répondue n'est jamais reposée, même reformulée (same_question) ;
+        # - une question sans réponse ne disparaît jamais d'elle-même ;
+        # - au-delà du plafond de séries, aucune NOUVELLE question n'est ajoutée (tracé dans l'audit).
+        answered_q = [s["text"].split(" Réponse :")[0] for s in state["sources"] if s["origin"] == "answer"]
+        answered_q += state.get("answered", [])
         previous = state.get("clarifications") or []
-        merged, seen = [], set(state.get("answered", []))
-        for q in previous + state["spec"].get("open_questions", []) + [q.model_dump() for q in c.questions]:
+        merged, seen, dropped = [], set(state.get("answered", [])), []
+        for q in previous:
             key = _norm(q["question"])
             if key not in seen:
                 seen.add(key)
-                merged.append({**q, "id": f"Q-{len(merged) + 1:03d}"})
+                merged.append(q)
+        kept_before = len(merged)
+        for q in new:
+            key = _norm(q["question"])
+            if key in seen or any(same_question(q["question"], t) for t in answered_q + [m["question"] for m in merged]):
+                continue
+            if capped:
+                dropped.append(q["question"])
+                continue
+            seen.add(key)
+            merged.append(q)
+        merged = [{**q, "id": f"Q-{i:03d}"} for i, q in enumerate(merged, 1)]
+        update: dict[str, Any] = {"clarifications": merged, "stage": "spec",
+                                  "clarify_rounds": rounds + (1 if len(merged) > kept_before else 0)}
+        if dropped:
+            update["audit"] = [{"time": _now(), "type": "plafond", "stage": "spec", "action": "questions non posées",
+                                "alerts": [], "answers": {}, "feedback": "", "refused": None,
+                                "justification": f"plafond de {max_clarify_rounds()} séries de questions atteint : "
+                                                 + " | ".join(dropped)}]
         view = {**state, "clarifications": merged}
         render.write(out, "spec.md", render.spec_md(view, merged))
         render.write(out, "spec.json", _dump(state["spec"]))
-        return {"clarifications": merged, "stage": "spec"}
+        return update
 
     # ---------------- 4. plan ----------------
     def plan(state: SDDState):
