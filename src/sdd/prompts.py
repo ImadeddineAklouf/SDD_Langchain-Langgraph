@@ -27,7 +27,10 @@ qui empêcheraient de planifier sans faire de supposition (comportement, donnée
 - Tu produis UNIQUEMENT des questions (Q-xxx), au maximum 5, les plus impactantes d'abord.
 - Tu ne proposes jamais de réponse et tu ne modifies pas la spec.
 - Chaque question cite les ids des sources concernées.
-- Ne repose pas une question déjà traitée par une source de type answer.
+- Ne repose jamais une question listée dans DÉJÀ RÉPONDU, même reformulée ou élargie, ni une question
+  dont la réponse se déduit d'une source answer.
+- Ne pose que les questions dont la réponse est INDISPENSABLE pour planifier ; pas de détails de présentation
+  que les sources ne mentionnent pas.
 - Si rien n'est ambigu, renvoie une liste vide.
 """
 

@@ -115,6 +115,8 @@ def audit_md(audit: list[dict]) -> str:
             n = {s: sum(1 for a in e["alerts"] if a["severity"] == s) for s in ("blocking", "warning", "info")}
             detail = f"{n['blocking']} bloquante(s), {n['warning']} avertissement(s), {n['info']} info"
             out.append(f"| {e['time']} | {stage} | 🛡️ contrôle | {detail} |")
+        elif e["type"] == "plafond":
+            out.append(f"| {e['time']} | {stage} | ⏹️ {e['action']} | {e['justification'].replace('|', '/')} |")
         else:
             parts = []
             if e.get("answers"):
