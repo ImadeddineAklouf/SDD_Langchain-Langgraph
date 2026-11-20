@@ -138,6 +138,17 @@ def _answered_block(state: SDDState) -> str:
             + "\n".join(f"[{s['id']}] {s['text']}" for s in done))
 
 
+def _checklist(state: SDDState) -> str:
+    """Liste explicite des sources à couvrir : sur un gros brief, le modèle en oublie sinon une partie."""
+    brief = [s["id"] for s in state["sources"] if s["origin"] == "brief"]
+    answers = [s["id"] for s in state["sources"] if s["origin"] == "answer"]
+    out = f"\n\nÀ COUVRIR OBLIGATOIREMENT ({len(brief)} phrases du brief, chacune par une exigence ou une question) : "
+    out += ", ".join(brief)
+    if answers:
+        out += f"\nÀ CITER OBLIGATOIREMENT ({len(answers)} réponses humaines, chacune par une exigence) : " + ", ".join(answers)
+    return out
+
+
 def _dump(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1)
 
@@ -223,7 +234,7 @@ def build_graph(
         render.write(out, "sources.json", _dump(state["sources"]))
         sources = _sources(state)
         spec, errs = gen(
-            llm, Spec, prompts.SPECIFY, "SOURCES :\n" + _fmt_sources(state) + _answered_block(state),
+            llm, Spec, prompts.SPECIFY, "SOURCES :\n" + _fmt_sources(state) + _answered_block(state) + _checklist(state),
             lambda s: validate_spec(s, sources), max_retries,
         )
         if errs:  # le modèle n'a pas su corriger : réparation déterministe, sans rien inventer

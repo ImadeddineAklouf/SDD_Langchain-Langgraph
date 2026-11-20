@@ -467,3 +467,16 @@ def test_spec_repaired_deterministically_when_model_forgets_answers_and_brief_li
     assert added["A-002"].kind == "constraint" and added["A-002"].statement == sources[-1].text  # mot pour mot
     assert added["B-002"].statement == "Les tâches sont sauvegardées dans un fichier JSON local."
     assert len(notes) == 3
+
+
+def test_repair_reclassifies_constitution_only_functional_requirement():
+    from sdd.validators import repair_spec
+
+    sources = split_statements(CONSTITUTION, "C", "constitution") + split_statements(BRIEF, "B", "brief")
+    d = GOOD_SPEC.model_dump()
+    d["requirements"].append({"id": "REQ-003", "kind": "functional", "statement": "Le code est écrit en Python 3.11.",
+                              "citations": [cite("C-001", "Le code est écrit en Python 3.11.")]})
+    spec = Spec.model_validate(d)
+    assert any("REQ-003" in e and "constitution" in e for e in validate_spec(spec, sources))
+    fixed, notes = repair_spec(spec, sources)
+    assert validate_spec(fixed, sources) == [] and fixed.requirements[-1].kind == "constraint"
