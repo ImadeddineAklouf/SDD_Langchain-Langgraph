@@ -39,6 +39,7 @@ from .ingest import split_statements
 from .llm import generate
 from .models import Clarifications, GateDecision, Implementation, Plan, SourceStatement, Spec, TaskList
 from .validators import (
+    repair_spec,
     _norm,
     analyze,
     fixable_files,
@@ -225,6 +226,14 @@ def build_graph(
             llm, Spec, prompts.SPECIFY, "SOURCES :\n" + _fmt_sources(state) + _answered_block(state),
             lambda s: validate_spec(s, sources), max_retries,
         )
+        if errs:  # le modèle n'a pas su corriger : réparation déterministe, sans rien inventer
+            fixed, notes = repair_spec(spec, sources)
+            fixed_errs = validate_spec(fixed, sources)
+            if notes and len(fixed_errs) < len(errs):
+                spec, errs = fixed, fixed_errs
+                update["audit"] = [{"time": _now(), "type": "réparation", "stage": "spec",
+                                    "action": "réparation automatique de la spec", "alerts": [], "answers": {},
+                                    "feedback": "", "refused": None, "justification": " ; ".join(notes)}]
         return {**update, "spec": spec.model_dump(), "spec_errors": errs}
 
     # ---------------- 3. clarify (LLM : questions seulement ; les réponses viennent de l'humain) ----------------
