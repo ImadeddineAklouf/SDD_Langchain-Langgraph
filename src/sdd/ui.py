@@ -43,24 +43,29 @@ def _graph(thread: str, max_retries: int, require_tests: bool, factory: bool):
     """Un graphe par session, avec son checkpointer SQLite (reprise possible, comme la CLI)."""
     import streamlit as st
 
-    from sdd.llm import fallback_label, guardian_name, guardian_semantic_enabled, model_name, provider
+    from sdd.llm import (
+        corrector_enabled, corrector_name, corrector_rounds, fallback_label, guardian_name,
+        guardian_semantic_enabled, model_name, provider,
+    )
 
     @st.cache_resource(show_spinner=False)
     def build(thread: str, max_retries: int, require_tests: bool, factory: bool, _llm_key: tuple):
         from langgraph.checkpoint.sqlite import SqliteSaver
 
         from sdd.graph import SUPERVISED, build_graph
-        from sdd.llm import get_fallback_llm, get_guardian_llm, get_llm
+        from sdd.llm import corrector_rounds, get_corrector_llm, get_fallback_llm, get_guardian_llm, get_llm
 
         out = ROOT_OUT / thread
         out.mkdir(parents=True, exist_ok=True)
         saver = SqliteSaver(sqlite3.connect(out / "checkpoints.db", check_same_thread=False))
         return build_graph(get_llm(), out, max_retries, checkpointer=saver, require_tests=require_tests,
                            fallback_llm=get_fallback_llm(), guardian_llm=get_guardian_llm(),
-                           checkpoints=() if factory else SUPERVISED)
+                           checkpoints=() if factory else SUPERVISED,
+                           corrector_llm=get_corrector_llm(), max_corrections=corrector_rounds())
 
     # le graphe est reconstruit si l'on change de fournisseur, de modèle ou de réglage du Gardien
-    key = (provider(), model_name(), fallback_label(), guardian_name(), guardian_semantic_enabled())
+    key = (provider(), model_name(), fallback_label(), guardian_name(), guardian_semantic_enabled(),
+           corrector_enabled(), corrector_name(), corrector_rounds())
     return build(thread, max_retries, require_tests, factory, key)
 
 
@@ -166,6 +171,19 @@ def render() -> None:
             g_model = st.selectbox("Modèle du Gardien (idéalement différent du producteur)", g_opts,
                                    index=g_opts.index(g_cur) if g_cur in g_opts else 0)
             os.environ["SDD_GUARDIAN_MODEL"] = "" if g_model == "(même modèle)" else g_model
+        st.divider()
+        st.subheader("🩹 Correcteur")
+        corr = st.checkbox("Corriger automatiquement ce que le Gardien refuse (avant de vous solliciter)", value=True,
+                           help="3e agent : il propose des corrections ciblées (patchs) ; chacune est revalidée par "
+                                "le code et n'est gardée que si elle réduit les erreurs. Les questions restent à vous.")
+        os.environ["SDD_CORRECTOR"] = "1" if corr else "0"
+        if corr:
+            c_opts = ["(même modèle)"] + [m for m in (available or []) if m != model]
+            c_cur = os.getenv("SDD_CORRECTOR_MODEL") or "(même modèle)"
+            c_model = st.selectbox("Modèle du Correcteur", c_opts, index=c_opts.index(c_cur) if c_cur in c_opts else 0)
+            os.environ["SDD_CORRECTOR_MODEL"] = "" if c_model == "(même modèle)" else c_model
+            os.environ["SDD_CORRECTOR_ROUNDS"] = str(st.number_input("Tours du Correcteur avant de vous solliciter",
+                                                                      1, 5, int(os.getenv("SDD_CORRECTOR_ROUNDS", "2"))))
         st.divider()
         st.subheader("Reprendre une session")
         old = st.text_input("Identifiant de session", placeholder="ex. 3f9a1c2b")

@@ -104,6 +104,25 @@ class TaskList(Strict):
 
 
 # --------------------------------------------------------------------------- #
+# Le Correcteur : corrections ciblées (patchs), jamais une réécriture complète
+# --------------------------------------------------------------------------- #
+class PatchOp(Strict):
+    """Une correction ciblée d'un artefact JSON (spec, plan ou tâches)."""
+    op: Literal["set", "append", "remove"] = Field(
+        description="set : remplacer la valeur au chemin ; append : ajouter à la liste au chemin ; "
+                    "remove : supprimer l'élément au chemin")
+    path: str = Field(description="Chemin : champs séparés par '/', éléments de liste désignés par leur id "
+                                  "(ou name), ex. requirements/REQ-003/kind, requirements/REQ-003/citations, "
+                                  "requirements, items/PLN-002/requirement_ids, tasks/T-004")
+    value: str = Field(default="", description="Valeur en JSON (vide pour remove)")
+    reason: str = Field(description="Alerte corrigée et source qui justifie la correction")
+
+
+class Correction(Strict):
+    ops: list[PatchOp] = Field(default_factory=list, max_length=25)
+
+
+# --------------------------------------------------------------------------- #
 # 4. Implémentation
 # --------------------------------------------------------------------------- #
 class FileChange(Strict):

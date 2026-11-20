@@ -7,7 +7,7 @@ Le LLM **transforme** les entrées mais n'a jamais le droit d'**inventer**.
 📘 Le rapport complet (concepts, architecture, code, choix, exécution réelle) est dans
 [`docs/rapport-sdd-pipeline.pdf`](docs/rapport-sdd-pipeline.pdf).
 
-## Architecture « AI factory » : un producteur, un Gardien
+## Architecture « AI factory » : un producteur, un Gardien, un Correcteur
 
 D'un côté, le **graphe SDD** produit (spec, plan, tâches, code). De l'autre, le **Gardien**, un graphe LangGraph
 compilé à part, vérifie après **chaque** étape la cohérence brief ↔ spec ↔ plan ↔ tâches ↔ code. Au moindre
@@ -27,6 +27,11 @@ obligatoire), **continuer** (avertissements seulement) ou **arrêter**. Le workf
 - **Sémantique ensuite** (LLM, facultatif, idéalement un autre modèle) : contradiction, déformation, hors périmètre.
   Il ne peut **qu'ajouter** des alertes ; un constat qui cite un id inexistant est écarté.
 - **Plus d'implémentation tant qu'une question reste ouverte**, et une question sans réponse ne disparaît jamais d'elle-même.
+- **Correcteur** (`corrector.py`, 3e agent) : avant de vous solliciter, il propose des corrections **ciblées**
+  (patchs `set` / `append` / `remove`) pour les alertes mécaniques (citation manquante, réponse non reprise,
+  exigence non couverte…). Chaque patch est revalidé par le code et n'est gardé que s'il réduit les erreurs ;
+  le Gardien revérifie ensuite tout. Tours bornés (`SDD_CORRECTOR_ROUNDS`, 2), modèle réglable
+  (`SDD_CORRECTOR_MODEL`), désactivable (`--no-corrector`). Les questions ouvertes restent à l'humain.
 - **Mode usine** (défaut) : pause uniquement sur alerte. **Mode supervisé** : pause aussi à chaque étape.
 
 ## Garde-fous du producteur : le LLM propose, du code déterministe dispose

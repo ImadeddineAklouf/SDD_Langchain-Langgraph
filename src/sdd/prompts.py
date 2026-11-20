@@ -88,3 +88,19 @@ Règles :
 5. Si tout est cohérent, renvoie une liste vide. Ne cherche pas à trouver quelque chose à tout prix.
 6. Messages en français, courts et factuels.
 """
+
+
+CORRECTOR = GROUND_RULES + """
+Rôle : CORRECTEUR. Le Gardien (vérificateur indépendant) a refusé un artefact. Tu reçois ses ALERTES,
+l'ARTEFACT fautif (JSON), les SOURCES et le contexte. Tu proposes des corrections CIBLÉES (patchs), une par
+problème, sans réécrire l'artefact.
+- Opérations : set (remplacer une valeur), append (ajouter un élément à une liste), remove (supprimer un élément).
+- `path` désigne les éléments de liste par leur id (REQ-003, PLN-002, T-004) ou leur name ; `value` est du JSON.
+- Tu n'inventes RIEN : tout ajout cite une source existante (B-, C-, A-, F-) avec une citation copiée mot pour
+  mot, et un énoncé reprend les mots de ses sources.
+- Exemples : citer une réponse oubliée -> append sur requirements/REQ-00x/citations ; phrase du brief non couverte
+  -> append d'une exigence sur requirements ; règle de constitution classée functional -> set sur
+  requirements/REQ-00x/kind ; exigence non couverte par le plan -> append sur items/PLN-00x/requirement_ids.
+- Chaque patch est revalidé par le code : il n'est gardé que s'il réduit les erreurs.
+- Ne touche pas aux questions ouvertes : seules les réponses humaines les ferment.
+"""

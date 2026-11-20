@@ -802,6 +802,41 @@ alerte ?*
 Dans les deux modes, il n'existe qu'un seul mécanisme de pause, la porte `gate`, et donc une seule façon de
 décider, toujours tracée.
 
+## 8.10 Le Correcteur : le troisième agent
+
+Les essais réels ont montré que le producteur oublie des éléments sur les gros briefs, et que la seule issue
+était alors la pause humaine, même pour une erreur purement mécanique (une citation manquante, une exigence non
+reliée au plan). L'usine compte donc un troisième agent, le **Correcteur** (`src/sdd/corrector.py`), qui
+s'intercale entre le Gardien et l'humain :
+
+```text
+producteur → Gardien → (alerte corrigeable ?) → Correcteur → Gardien revérifie → … → humain si besoin
+```
+
+Ses règles :
+
+- **Il ne reçoit que ce qu'il doit corriger** : les alertes bloquantes corrigeables (`SPEC_INVALIDE`,
+  `REPONSE_IGNOREE`, `PLAN_INVALIDE`, `TACHES_INVALIDES`), l'artefact fautif (spec, plan ou tâches) et les
+  sources. Les **questions ouvertes ne lui sont jamais confiées** : seules les réponses humaines les ferment.
+- **Des patchs, pas une réécriture** : sa sortie structurée `Correction` est une liste d'opérations `PatchOp`
+  (`set`, `append`, `remove`) sur un chemin, où les éléments de liste sont désignés par leur id :
+  `requirements/REQ-003/kind`, `requirements/REQ-003/citations`, `items/PLN-002/requirement_ids`…
+- **Il ne valide rien lui-même** : `apply_corrections` applique chaque patch sur une copie, revalide avec les
+  **mêmes validateurs déterministes** que le Gardien, et ne le garde que s'il **fait baisser le nombre
+  d'erreurs**. Une citation inventée (pas mot pour mot), une technologie non sourcée ou une exigence inconnue
+  sont donc rejetées par le code.
+- **Il est borné** : `SDD_CORRECTOR_ROUNDS` tours (2 par défaut) depuis la dernière production ; ensuite, c'est
+  la pause humaine habituelle (`gate`).
+- **Il peut utiliser un autre modèle** (`SDD_CORRECTOR_MODEL`, ou « Modèle du Correcteur » dans la barre
+  latérale) et se désactive (`SDD_CORRECTOR=0`, case à décocher, ou `--no-corrector` en ligne de commande).
+- **Tout est tracé** : chaque patch, gardé (✔) ou rejeté (✘) avec son motif, est écrit dans `audit.md` (🩹).
+
+Dans LangGraph, c'est un nœud standard, `corrector`. La fonction de routage `route_guardian` l'appelle avant
+`gate` quand des alertes corrigeables existent et que le plafond n'est pas atteint, et une arête simple
+`corrector → guardian` fait revérifier le résultat. L'ordre complet face à une spec incomplète est donc :
+réparation déterministe (`repair_spec`, §7.2), puis Gardien, puis Correcteur pour ce qui reste, puis Gardien
+à nouveau, et l'humain seulement en dernier recours.
+
 # 9. Étude de cas : le test « dépenses » qui a motivé le Gardien
 
 ## 9.1 Ce qui s'est passé
@@ -1303,7 +1338,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**52 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**57 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1393,7 +1428,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 52 tests hors ligne, sans clé
+python -m pytest                   # 57 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 
@@ -1460,6 +1495,8 @@ Reprendre une session : `sdd examples/brief.md --out out --thread <identifiant>`
 | `--model` / `SDD_MODEL` | nom du modèle |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
 | `SDD_FALLBACK_PROVIDER` | fournisseur du secours (défaut pour Gemini : `groq` si `GROQ_API_KEY` est présente) |
+| `--no-corrector` / `SDD_CORRECTOR=0` | sans Correcteur : toute alerte va directement à l'humain |
+| `SDD_CORRECTOR_MODEL` / `SDD_CORRECTOR_ROUNDS` | modèle du Correcteur (vide = même modèle) et nombre de tours (2) |
 | `SDD_CLARIFY_ROUNDS` | nombre maximal de séries de questions de clarification (2) |
 | `SDD_TIMEOUT` | délai maximal d'un appel au modèle, essais compris, garanti côté Python (120 s) |
 | `SDD_THINKING` | réflexion des modèles Gemini 3 : `minimal`, `low` (défaut), `medium`, `high` |
