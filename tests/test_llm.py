@@ -89,3 +89,24 @@ def test_generate_stops_immediately_on_api_error():
     with pytest.raises(ModelNotFoundError):
         generate(DownLLM(), Spec, "sys", "payload", lambda s: [], max_retries=3)
     assert len(calls) == 1  # pas de 3 relances inutiles, pas de « Sortie non conforme au schéma »
+
+
+def test_gemini_call_has_timeout_and_short_thinking(monkeypatch):
+    """Un appel ne peut jamais bloquer indéfiniment (écran figé sur la première étape)."""
+    m = llm.get_llm()
+    assert m.timeout == 120 and m.max_retries == 3
+    assert m.thinking_config == {"thinking_level": "low"}
+    monkeypatch.setenv("SDD_TIMEOUT", "30")
+    monkeypatch.setenv("SDD_THINKING", "high")
+    m = llm.get_llm()
+    assert m.timeout == 30 and m.thinking_config == {"thinking_level": "high"}
+    assert llm.get_llm("gemini-2.5-flash").thinking_config is None  # thinking_level : Gemini 3 seulement
+
+
+def test_timeout_stops_the_step_with_a_clear_message():
+    class ReadTimeout(Exception):
+        pass
+
+    exc = ReadTimeout("timed out")
+    assert llm.is_api_error(exc)  # pas de 4 relances de 2 minutes chacune
+    assert "n'a pas répondu dans le délai" in llm.explain_error(exc)

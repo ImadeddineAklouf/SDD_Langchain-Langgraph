@@ -1046,7 +1046,22 @@ Le modèle exact se règle avec `SDD_MODEL` ; la méthode de sortie structurée 
 liste des modèles gratuits évolue vite : c'est pourquoi rien n'est figé dans le code métier.
 
 
-## 13.7 Le modèle du Gardien
+## 13.7 Ne jamais rester bloqué : délai, réflexion et progression
+
+Un premier essai réel avec le Gardien est resté plus de dix minutes sur la première étape, sans aucun message.
+Trois causes se cumulaient : aucun **délai maximal** sur les appels (un appel lent pouvait attendre
+indéfiniment), la **réflexion longue** par défaut des modèles Gemini 3 (inutile pour une transformation contrainte
+par un schéma), et une boucle de correction qui pouvait enchaîner quatre appels lents sans rien afficher.
+
+- Chaque appel Gemini a maintenant un délai (`timeout`, 120 s par défaut, `SDD_TIMEOUT`) et au plus 3 essais côté
+  client ; un délai dépassé est une **erreur du fournisseur** : l'étape s'arrête, l'interface explique le problème,
+  et la session reste reprenable.
+- Les modèles Gemini 3 sont réglés sur une réflexion courte (`thinking_level="low"`, `SDD_THINKING`).
+- Chaque appel au modèle est **tracé** : dans le terminal (`HH:MM:SS [sdd] Spec : appel au modèle (essai 1/4)…`,
+  puis « réponse en 23 s, valide ») et **en direct dans l'interface**, grâce au flux standard `custom` de LangGraph
+  (`get_stream_writer()` dans `generate()`, `stream_mode=["updates", "custom"]` dans `runner.advance`).
+
+## 13.8 Le modèle du Gardien
 
 Le contrôle sémantique utilise le modèle désigné par `SDD_GUARDIAN_MODEL` (ou la liste « Modèle du Gardien » de
 l'interface). Par défaut, c'est le même modèle que le producteur. Il est recommandé d'en choisir un autre chez le
@@ -1383,6 +1398,8 @@ Reprendre une session : `sdd examples/brief.md --out out --thread <identifiant>`
 | `--provider` / `SDD_PROVIDER` | `gemini` (défaut), `groq`, `ollama` |
 | `--model` / `SDD_MODEL` | nom du modèle |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
+| `SDD_TIMEOUT` | délai maximal d'un appel au modèle, en secondes (120) |
+| `SDD_THINKING` | réflexion des modèles Gemini 3 : `minimal`, `low` (défaut), `medium`, `high` |
 | `SDD_NUM_CTX` | contexte Ollama en tokens (16384) |
 | `SDD_STRUCTURED_METHOD` | `json_schema`, `function_calling`, `json_mode` |
 | `SDD_UI_OUT` | dossier de sortie de l'interface web (`out/ui`) |

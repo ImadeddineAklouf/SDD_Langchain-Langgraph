@@ -87,6 +87,9 @@ def render() -> None:
     from sdd.runner import NODE_TO_STEP, STAGE_TITLES, STEPS, advance, summarize
 
     st.cache_resource(load_dotenv)()  # une seule fois par processus : les choix de la barre latérale priment ensuite
+    from sdd.llm import setup_logging
+
+    setup_logging()  # chaque appel au modèle est tracé dans le terminal qui a lancé sdd-ui
     st.set_page_config(page_title="SDD Pipeline", page_icon="📐", layout="wide")
     ss = st.session_state
     ss.setdefault("thread", None)
@@ -201,8 +204,14 @@ def render() -> None:
     def run(inp, label: str) -> None:
         graph = _graph(ss.thread, max_retries, require_tests, factory)
         with st.status(label, expanded=True) as status:
+            live = status.empty()  # progression en direct : appel au modèle en cours, durée, validation
+
+            def on_progress(msg: str) -> None:
+                live.caption("⏳ " + msg)
+
             try:
-                ss.pending = advance(graph, inp, _cfg(ss.thread), on_update(status))
+                ss.pending = advance(graph, inp, _cfg(ss.thread), on_update(status), on_progress)
+                live.empty()
                 ss.finished = ss.pending is None
                 ss.error = None
                 status.update(label="Point de contrôle : à vous de décider" if ss.pending else "Workflow terminé", state="complete")

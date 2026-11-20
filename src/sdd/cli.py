@@ -60,6 +60,9 @@ def _ask_gate(payload: dict) -> dict:
 
 def main() -> None:
     load_dotenv()
+    from .llm import setup_logging
+
+    setup_logging()  # chaque appel au modèle (étape, essai, durée) s'affiche dans le terminal
     ap = argparse.ArgumentParser()
     ap.add_argument("brief")
     ap.add_argument("--constitution", default=None)

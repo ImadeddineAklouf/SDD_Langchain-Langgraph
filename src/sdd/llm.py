@@ -5,13 +5,19 @@ SDD_MODEL    = nom du modèle (défaut selon le fournisseur)
 SDD_FALLBACK_MODEL = modèle de secours si le principal échoue (quota...)
 SDD_GUARDIAN_MODEL = modèle du Gardien (contrôle sémantique), idéalement différent du producteur
 SDD_GUARDIAN_SEMANTIC = 1 (défaut) | 0 : active le contrôle sémantique par LLM du Gardien
+SDD_TIMEOUT  = délai maximal d'un appel au modèle, en secondes (défaut 120) : jamais d'attente infinie
+SDD_THINKING = niveau de réflexion des modèles Gemini 3 : minimal | low (défaut) | medium | high
 SDD_NUM_CTX  = taille du contexte Ollama en tokens (défaut 16384)
 SDD_STRUCTURED_METHOD = json_schema (défaut) | function_calling | json_mode
 OLLAMA_HOST  = adresse du serveur Ollama (défaut http://localhost:11434)
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
+
+log = logging.getLogger("sdd")
 
 PROVIDERS = ["gemini", "groq", "ollama"]
 DEFAULTS = {
@@ -57,14 +63,26 @@ def get_guardian_llm():
     return get_llm(guardian_name()) if guardian_semantic_enabled() else None
 
 
+def llm_timeout() -> float:
+    return float(os.getenv("SDD_TIMEOUT", "120"))
+
+
+def thinking_level() -> str:
+    return os.getenv("SDD_THINKING", "low").strip().lower()
+
+
 def get_llm(model: str | None = None):
     p = provider()
     model = model or model_name()
     if p == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        # max_retries : le tier gratuit limite les requêtes par minute ; on patiente au lieu d'échouer.
-        return ChatGoogleGenerativeAI(model=model, temperature=0, seed=42, max_retries=6)
+        # timeout : un appel ne peut jamais bloquer indéfiniment (l'erreur s'affiche au lieu d'un écran figé).
+        # max_retries : nombre total d'essais du client (429 / 503 / délai dépassé), avec attente croissante.
+        # thinking_level : les modèles Gemini 3 « réfléchissent » longuement par défaut ; pour une tâche de
+        # transformation contrainte par un schéma, une réflexion courte suffit et divise le temps de réponse.
+        extra = {"thinking_config": {"thinking_level": thinking_level()}} if model.startswith("gemini-3") else {}
+        return ChatGoogleGenerativeAI(model=model, temperature=0, seed=42, timeout=llm_timeout(), max_retries=3, **extra)
     if p == "groq":
         from langchain_groq import ChatGroq
 
@@ -91,6 +109,15 @@ def gemini_models() -> list[str] | None:
         return None
 
 
+_NETWORK = {"APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout", "ReadTimeout",
+            "WriteTimeout", "PoolTimeout", "TimeoutException", "TimeoutError", "ModelTimeoutError"}
+
+
+def _is_network_error(exc: Exception) -> bool:
+    """Délai dépassé ou connexion impossible (httpx, httpx2, openai…), reconnu par le nom de classe."""
+    return any(c.__name__ in _NETWORK for c in type(exc).__mro__)
+
+
 def is_api_error(exc: Exception) -> bool:
     """Erreur du fournisseur (clé, modèle introuvable, réseau, quota épuisé) : redemander ne sert à rien.
 
@@ -101,7 +128,7 @@ def is_api_error(exc: Exception) -> bool:
 
     if isinstance(exc, ModelError):
         return True
-    if type(exc).__name__ in ("APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout"):
+    if _is_network_error(exc):
         return True
     return getattr(exc, "status_code", None) in (401, 403, 404, 429)
 
@@ -124,7 +151,11 @@ def explain_error(exc: Exception) -> str:
     if isinstance(exc, ModelRateLimitError) or status == 429:
         return ("Quota gratuit du fournisseur atteint (modèle de secours compris). Attendez un peu, ou choisissez "
                 f"un autre modèle ou fournisseur dans la barre latérale. Détail : {detail}")
-    if isinstance(exc, (ModelConnectionError, ModelTimeoutError)) or "Connect" in type(exc).__name__:
+    if isinstance(exc, ModelTimeoutError) or any("Timeout" in c.__name__ for c in type(exc).__mro__):
+        return (f"Le modèle {model_name()} n'a pas répondu dans le délai de {llm_timeout():.0f} s (essais compris). "
+                "Le service est peut-être surchargé : réessayez, choisissez un modèle plus léger, ou augmentez "
+                f"SDD_TIMEOUT dans .env. Détail : {detail}")
+    if isinstance(exc, ModelConnectionError) or "Connect" in type(exc).__name__:
         return f"Connexion au fournisseur impossible : vérifiez votre connexion Internet. Détail : {detail}"
     return f"Erreur du fournisseur : {detail}"
 
@@ -164,15 +195,21 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     chain = prompt | model  # LCEL
     corrections: list = []
     obj, errors = None, ["Aucune sortie."]
-    for _ in range(max_retries + 1):
+    step = schema.__name__
+    for attempt in range(1, max_retries + 2):
+        _progress(f"{step} : appel au modèle (essai {attempt}/{max_retries + 1})…")
+        t0 = time.monotonic()
         try:
             out = chain.invoke({"input": payload, "corrections": corrections})
             obj = out if isinstance(out, schema) else schema.model_validate(out)
             errors = validate(obj)
         except Exception as exc:
-            if is_api_error(exc):  # clé, modèle introuvable, réseau, quota : inutile de redemander
+            if is_api_error(exc):  # clé, modèle introuvable, réseau, délai, quota : inutile de redemander
+                _progress(f"{step} : erreur du fournisseur après {time.monotonic() - t0:.0f} s : {type(exc).__name__}")
                 raise
             errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
+        _progress(f"{step} : réponse en {time.monotonic() - t0:.0f} s, "
+                  + ("valide" if not errors else f"{len(errors)} erreur(s) de validation, correction demandée"))
         if not errors:
             return obj, []
         if obj is not None:
@@ -189,3 +226,25 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     return obj, errors
 
 
+
+
+def _progress(message: str) -> None:
+    """Trace chaque appel au modèle : dans le terminal (logging) et, en direct, dans l'interface
+    (flux « custom » standard de LangGraph, via get_stream_writer)."""
+    log.info(message)
+    try:
+        from langgraph.config import get_stream_writer
+
+        get_stream_writer()({"progress": message})
+    except Exception:  # hors d'un graphe (tests unitaires, appel direct) : seulement le journal
+        pass
+
+
+def setup_logging() -> None:
+    """Affiche les traces du pipeline dans le terminal (sdd, sdd-ui)."""
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s [sdd] %(message)s", "%H:%M:%S"))
+        log.addHandler(h)
+        log.setLevel(logging.INFO)
+        log.propagate = False
