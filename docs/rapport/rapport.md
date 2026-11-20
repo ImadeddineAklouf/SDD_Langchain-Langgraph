@@ -157,7 +157,7 @@ Google, Ollama…) exposent la même interface : `invoke(messages)` renvoie un m
 
 ```python
 from langchain_google_genai import ChatGoogleGenerativeAI
-llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", temperature=0, seed=42, max_retries=6)
+llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", temperature=0, seed=42, timeout=120, max_retries=3)
 ```
 
 Changer de fournisseur revient à changer de classe (`ChatGroq`, `ChatOllama`) : le reste du code
@@ -1038,7 +1038,7 @@ Groq et Ollama restent sélectionnables sans changer de code (barre latérale de
 
 | `SDD_PROVIDER` | Modèle par défaut | Secours | Avantages | Inconvénients |
 |---|---|---|---|---|
-| `gemini` (défaut) | `gemini-3.8-flash` | au choix dans l'UI | gratuit, rien à installer, très grand contexte | quotas par minute et par jour, données du tier gratuit utilisables par Google |
+| `gemini` (défaut) | `gemini-3.8-flash` | Groq si `GROQ_API_KEY` est renseignée, sinon au choix dans l'UI | gratuit, rien à installer, très grand contexte | quotas par minute et par jour, données du tier gratuit utilisables par Google |
 | `groq` | `openai/gpt-oss-120b` | `openai/gpt-oss-20b` | gratuit, très rapide, gros modèle | quota journalier vite atteint |
 | `ollama` (optionnel) | `qwen3:14b` | aucun | 100 % local, privé, sans quota | à installer, lent, modèle plus petit |
 
@@ -1060,6 +1060,16 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
 - Chaque appel au modèle est **tracé** : dans le terminal (`HH:MM:SS [sdd] Spec : appel au modèle (essai 1/4)…`,
   puis « réponse en 23 s, valide ») et **en direct dans l'interface**, grâce au flux standard `custom` de LangGraph
   (`get_stream_writer()` dans `generate()`, `stream_mode=["updates", "custom"]` dans `runner.advance`).
+- **Secours chez un autre fournisseur** : si la clé Groq est aussi présente dans `.env`, le modèle de secours
+  par défaut de Gemini est `openai/gpt-oss-120b` chez Groq (`SDD_FALLBACK_PROVIDER`). Le mécanisme est le
+  `with_fallbacks` standard de LangChain : un délai dépassé, une panne ou un quota épuisé chez Gemini bascule
+  l'appel chez Groq sans interrompre le workflow. Groq a lui aussi un délai maximal (`timeout`).
+- **La rangée des étapes avance en direct** dans l'interface : elle est redessinée à chaque nœud terminé, au lieu
+  de rester sur « ○ » jusqu'à la fin du run, ce qui donnait l'impression que rien ne démarrait.
+
+Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
+`main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
+directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).
 
 ## 13.8 Le modèle du Gardien
 
@@ -1240,7 +1250,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**42 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**45 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1315,16 +1325,14 @@ perdues, le contrôle des fichiers de données et des dépendances, une décisio
 
 ## 17.1 Récupérer la nouvelle version sur votre Mac
 
-Le code du Gardien a été poussé sur la branche `claude/project-thread-q2x7y4` du dépôt GitHub. Pour l'intégrer à
-`main` et le publier, depuis le terminal :
+Tout le code (Gardien, délais, secours, progression en direct) est sur la branche `main` du dépôt GitHub. Pour
+récupérer la dernière version, depuis le terminal :
 
 ```bash
 cd ~/SDD_Langchain-Langgraph
 git checkout main
 git pull origin main
-git fetch origin claude/project-thread-q2x7y4
-git merge --no-edit origin/claude/project-thread-q2x7y4
-git push origin main
+git log --oneline -3               # la première ligne doit être le dernier correctif
 ```
 
 Puis mettre à jour l'environnement et vérifier :
@@ -1332,7 +1340,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 42 tests hors ligne
+python -m pytest                   # 45 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 
@@ -1398,13 +1406,14 @@ Reprendre une session : `sdd examples/brief.md --out out --thread <identifiant>`
 | `--provider` / `SDD_PROVIDER` | `gemini` (défaut), `groq`, `ollama` |
 | `--model` / `SDD_MODEL` | nom du modèle |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
+| `SDD_FALLBACK_PROVIDER` | fournisseur du secours (défaut pour Gemini : `groq` si `GROQ_API_KEY` est présente) |
 | `SDD_TIMEOUT` | délai maximal d'un appel au modèle, en secondes (120) |
 | `SDD_THINKING` | réflexion des modèles Gemini 3 : `minimal`, `low` (défaut), `medium`, `high` |
 | `SDD_NUM_CTX` | contexte Ollama en tokens (16384) |
 | `SDD_STRUCTURED_METHOD` | `json_schema`, `function_calling`, `json_mode` |
 | `SDD_UI_OUT` | dossier de sortie de l'interface web (`out/ui`) |
 
-## 13.6 Écrire un bon brief
+## 17.6 Écrire un bon brief
 
 - Une idée par ligne : chaque ligne devient une source citable. Les titres (`#`) sont ignorés.
 - Écrivez les critères d'acceptation si vous en avez (« le titre est obligatoire ») : sinon le pipeline n'en inventera pas.
@@ -1412,6 +1421,45 @@ Reprendre une session : `sdd examples/brief.md --out out --thread <identifiant>`
 
 - Répondez aux questions plutôt que d'accepter le risque : chaque réponse devient une source citable et
   évite une pause plus tard.
+
+## 17.7 Deux briefs pour tester
+
+Les deux briefs sont fournis dans `examples/`, à utiliser avec `examples/constitution.md`.
+
+**Brief « dépenses »** (`examples/brief-depenses.md`) : un cas réaliste, avec des trous volontaires (où et comment
+conserver les dépenses, format de la date, identification d'une dépense à supprimer). Le Gardien doit poser ces
+questions et bloquer l'implémentation tant qu'elles n'ont pas de réponse ; le code ne doit plus inventer de
+fichier `expenses.json`.
+
+```text
+# Suivi de dépenses personnelles en ligne de commande
+
+- L'utilisateur peut ajouter une dépense avec un montant, une catégorie et une date.
+- L'utilisateur peut lister ses dépenses, triées par date.
+- L'utilisateur peut supprimer une dépense.
+- L'utilisateur peut afficher le total des dépenses par catégorie.
+- Le montant d'une dépense doit être strictement positif.
+- Les dépenses sont conservées entre deux lancements du programme.
+```
+
+**Brief « réservation de salles » piégé** (`examples/brief-reservation-piege.md`) : il contient une contradiction
+(une seule personne par créneau, mais deux équipes peuvent partager), une exigence floue (« pas trop longue »),
+un canal de notification non précisé et un stockage non précisé. Résultat attendu : questions ouvertes et
+alertes bloquantes (contradiction signalée par le contrôle sémantique, `QUESTION_OUVERTE`), aucune durée maximale
+ni canal de notification inventés.
+
+```text
+# Réservation de salles de réunion (brief piégé pour tester le Gardien)
+
+- Un employé peut réserver une salle pour un créneau donné.
+- Une salle ne peut être réservée que par une seule personne sur un même créneau.
+- Deux équipes peuvent réserver la même salle au même créneau si elles partagent la réunion.
+- Un employé peut annuler sa réservation.
+- Un employé peut lister les salles libres pour un créneau.
+- Une réservation ne doit pas être trop longue.
+- Le responsable reçoit une notification à chaque réservation.
+- Les réservations sont conservées.
+```
 
 # 18. Limites et évolutions possibles
 

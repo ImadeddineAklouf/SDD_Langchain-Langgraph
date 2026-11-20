@@ -3,6 +3,7 @@
 SDD_PROVIDER = gemini (défaut, API Google gratuite) | groq | ollama (local, optionnel)
 SDD_MODEL    = nom du modèle (défaut selon le fournisseur)
 SDD_FALLBACK_MODEL = modèle de secours si le principal échoue (quota...)
+SDD_FALLBACK_PROVIDER = fournisseur du secours (défaut : l'autre fournisseur cloud si sa clé est présente)
 SDD_GUARDIAN_MODEL = modèle du Gardien (contrôle sémantique), idéalement différent du producteur
 SDD_GUARDIAN_SEMANTIC = 1 (défaut) | 0 : active le contrôle sémantique par LLM du Gardien
 SDD_TIMEOUT  = délai maximal d'un appel au modèle, en secondes (défaut 120) : jamais d'attente infinie
@@ -39,14 +40,42 @@ def model_name() -> str:
     return os.getenv("SDD_MODEL") or DEFAULTS.get(provider(), "")
 
 
+def fallback_provider() -> str:
+    """Fournisseur du modèle de secours.
+
+    SDD_FALLBACK_PROVIDER s'il est défini ; sinon, si le fournisseur n'a pas de secours interne (Gemini),
+    qu'aucun secours n'est fixé et que la clé de l'autre fournisseur cloud est présente, on bascule chez lui : une panne, une lenteur ou un quota
+    épuisé chez l'un ne bloque plus le workflow."""
+    explicit = os.getenv("SDD_FALLBACK_PROVIDER", "").strip().lower()
+    if explicit:
+        return explicit
+    p = provider()
+    if "SDD_FALLBACK_MODEL" not in os.environ and not FALLBACKS.get(p):
+        other = {"gemini": "groq", "groq": "gemini"}.get(p)
+        if other and os.getenv(API_KEYS[other]):
+            return other
+    return p
+
+
 def fallback_name() -> str:
+    fp = fallback_provider()
+    if fp != provider():
+        return os.getenv("SDD_FALLBACK_MODEL") or DEFAULTS.get(fp, "")
     return os.getenv("SDD_FALLBACK_MODEL", FALLBACKS.get(provider(), ""))
 
 
+def fallback_label() -> str:
+    """« modèle » ou « fournisseur/modèle » si le secours est chez un autre fournisseur ; "" si aucun."""
+    name = fallback_name()
+    if not name:
+        return ""
+    return name if fallback_provider() == provider() else f"{fallback_provider()}/{name}"
+
+
 def get_fallback_llm():
-    """Modèle de secours (quota atteint, panne). SDD_FALLBACK_MODEL="" pour désactiver."""
+    """Modèle de secours (quota atteint, panne, délai dépassé). SDD_FALLBACK_MODEL="" pour désactiver."""
     model = fallback_name()
-    return get_llm(model) if model else None
+    return get_llm(model, fallback_provider()) if model else None
 
 
 def guardian_name() -> str:
@@ -71,9 +100,9 @@ def thinking_level() -> str:
     return os.getenv("SDD_THINKING", "low").strip().lower()
 
 
-def get_llm(model: str | None = None):
-    p = provider()
-    model = model or model_name()
+def get_llm(model: str | None = None, prov: str | None = None):
+    p = prov or provider()
+    model = model or (model_name() if p == provider() else DEFAULTS.get(p, ""))
     if p == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -86,7 +115,7 @@ def get_llm(model: str | None = None):
     if p == "groq":
         from langchain_groq import ChatGroq
 
-        return ChatGroq(model=model, temperature=0, max_retries=2, model_kwargs={"seed": 42})
+        return ChatGroq(model=model, temperature=0, max_retries=2, timeout=llm_timeout(), model_kwargs={"seed": 42})
     if p == "ollama":
         from langchain_ollama import ChatOllama
 

@@ -7,7 +7,7 @@ from sdd.models import Spec
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for v in ("SDD_PROVIDER", "SDD_MODEL", "SDD_FALLBACK_MODEL", "SDD_NUM_CTX"):
+    for v in ("SDD_PROVIDER", "SDD_MODEL", "SDD_FALLBACK_MODEL", "SDD_FALLBACK_PROVIDER", "SDD_NUM_CTX"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "test")
     monkeypatch.setenv("GROQ_API_KEY", "test")
@@ -19,7 +19,7 @@ def test_gemini_is_default_provider(monkeypatch):
     m = llm.get_llm()
     assert isinstance(m, ChatGoogleGenerativeAI)
     assert (m.model, m.temperature, m.seed) == ("gemini-3.8-flash", 0, 42)
-    assert llm.get_fallback_llm() is None  # modèles ouverts variables selon le compte : secours au choix
+    assert llm.fallback_label() == "groq/openai/gpt-oss-120b"  # clé Groq présente : secours chez Groq
     monkeypatch.setenv("SDD_FALLBACK_MODEL", "gemini-3.8-flash-lite")
     assert llm.get_fallback_llm().model == "gemini-3.8-flash-lite"
 
@@ -110,3 +110,22 @@ def test_timeout_stops_the_step_with_a_clear_message():
     exc = ReadTimeout("timed out")
     assert llm.is_api_error(exc)  # pas de 4 relances de 2 minutes chacune
     assert "n'a pas répondu dans le délai" in llm.explain_error(exc)
+
+
+def test_secours_chez_l_autre_fournisseur(monkeypatch):
+    """Clé Groq présente et aucun secours fixé : Gemini bascule sur Groq en cas de panne ou de lenteur."""
+    from sdd import llm
+
+    for var in ("SDD_FALLBACK_MODEL", "SDD_FALLBACK_PROVIDER", "SDD_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SDD_PROVIDER", "gemini")
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    assert llm.fallback_provider() == "groq"
+    assert llm.fallback_label() == "groq/" + llm.DEFAULTS["groq"]
+    fb = llm.get_fallback_llm()
+    assert type(fb).__name__ == "ChatGroq" and fb.request_timeout == llm.llm_timeout()
+    monkeypatch.setenv("SDD_FALLBACK_MODEL", "")  # désactivation explicite
+    assert llm.fallback_label() == "" and llm.get_fallback_llm() is None
+    monkeypatch.delenv("SDD_FALLBACK_MODEL")
+    monkeypatch.delenv("GROQ_API_KEY")
+    assert llm.fallback_provider() == "gemini" and llm.get_fallback_llm() is None

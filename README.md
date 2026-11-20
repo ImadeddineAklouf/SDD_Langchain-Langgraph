@@ -62,7 +62,9 @@ Usage standard de LangGraph : `StateGraph`, arêtes conditionnelles, sous-graphe
 Par défaut **Google Gemini `gemini-3.8-flash`** via l'API gratuite (clé sur https://aistudio.google.com/apikey).
 Rien ne tourne sur votre machine. Les modèles ouverts dépendent du compte (`gemini-2.5-flash` est fermé aux
 nouveaux comptes) : la barre latérale de l'UI liste ceux **réellement disponibles pour votre clé** et permet de
-choisir le modèle principal et un modèle de secours (même clé, quota séparé). La sortie structurée passe le JSON Schema à Gemini (`response_json_schema`),
+choisir le modèle principal et un modèle de secours (même clé, quota séparé). Si `GROQ_API_KEY` est aussi
+renseignée, le secours par défaut est Groq : une panne, un délai dépassé ou un quota épuisé chez Gemini bascule
+automatiquement l'appel chez Groq (`SDD_FALLBACK_PROVIDER`). La sortie structurée passe le JSON Schema à Gemini (`response_json_schema`),
 qui contraint la génération.
 
 Toujours disponibles, via la barre latérale de l'UI, `--provider`/`--model` en CLI, ou le `.env` :
