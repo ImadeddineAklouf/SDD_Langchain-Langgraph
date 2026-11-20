@@ -1026,8 +1026,8 @@ Le fournisseur par défaut est donc devenu **Google Gemini**, via son API gratui
   `response_mime_type="application/json"` et le JSON Schema Pydantic dans `response_json_schema`. Gemini génère
   alors uniquement du JSON conforme. Un test le vérifie
   (`test_gemini_structured_output_constrains_generation_to_schema`).
-- **Limite par minute** : le tier gratuit limite aussi le nombre de requêtes par minute. `max_retries=6` fait
-  patienter le client (avec attente croissante) au lieu d'échouer au premier refus.
+- **Limite par minute** : le tier gratuit limite aussi le nombre de requêtes par minute. `max_retries=3` fait
+  patienter le client (avec attente croissante) au lieu d'échouer au premier refus, dans la limite du délai `timeout` (13.7).
 - **Clé** : créée gratuitement sur Google AI Studio, placée dans `.env` (`GOOGLE_API_KEY`), jamais dans le code.
 - **Contrepartie** : les données envoyées au tier gratuit peuvent servir à Google pour améliorer ses modèles ;
   à éviter pour du code confidentiel.
