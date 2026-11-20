@@ -38,6 +38,8 @@ from .guardian import build_guardian, check_decision, redo_node
 from .ingest import split_statements
 from .llm import generate
 from .models import Clarifications, GateDecision, Implementation, Plan, SourceStatement, Spec, TaskList
+from .corrector import apply_corrections, correctable, correction_payload
+from .models import Correction
 from .validators import (
     repair_spec,
     _norm,
@@ -88,6 +90,7 @@ class SDDState(TypedDict, total=False):
     accepted: list[str]        # empreintes des alertes acceptées / acquittées par l'humain
     answered: list[str]        # questions déjà répondues (texte normalisé) : jamais reposées
     clarify_rounds: int        # séries de questions déjà générées (plafonnées)
+    corrector_rounds: int      # tours du Correcteur depuis la dernière production (plafonnés)
     redo: str                  # nœud à relancer après une réponse ou une correction
     gate_error: str | None     # décision humaine refusée (ex. accepter un risque sans justification)
     audit: Annotated[list[dict], operator.add]  # journal d'audit (réducteur : on ajoute, on n'efface jamais)
@@ -204,13 +207,15 @@ def run_tests(ws: Path, timeout: int = 120) -> dict:
 def build_graph(
     llm, out_dir: str | Path = "out", max_retries: int = 3, checkpointer=None,
     max_fix_attempts: int = 3, require_tests: bool = False, fallback_llm=None,
-    guardian_llm=None, checkpoints: Iterable[str] = (),
+    guardian_llm=None, checkpoints: Iterable[str] = (), corrector_llm=None, max_corrections: int = 2,
 ):
     """Construit le graphe SDD surveillé par le Gardien.
 
     guardian_llm : LLM du contrôle sémantique du Gardien (None = contrôles déterministes seuls).
     checkpoints  : étapes où l'on fait une pause même sans alerte (SUPERVISED = toutes) ;
                    vide = mode « usine » : pause uniquement quand le Gardien lève une alerte.
+    corrector_llm : LLM du Correcteur (None = pas de Correcteur : toute alerte va à l'humain).
+    max_corrections : tours du Correcteur avant la pause humaine.
     """
     out = Path(out_dir)
     ws = out / "workspace"
@@ -245,7 +250,7 @@ def build_graph(
                 update["audit"] = [{"time": _now(), "type": "réparation", "stage": "spec",
                                     "action": "réparation automatique de la spec", "alerts": [], "answers": {},
                                     "feedback": "", "refused": None, "justification": " ; ".join(notes)}]
-        return {**update, "spec": spec.model_dump(), "spec_errors": errs}
+        return {**update, "spec": spec.model_dump(), "spec_errors": errs, "corrector_rounds": 0}
 
     # ---------------- 3. clarify (LLM : questions seulement ; les réponses viennent de l'humain) ----------------
     def clarify(state: SDDState):
@@ -309,7 +314,7 @@ def build_graph(
         view = {**state, "plan": p, "plan_errors": errs}
         render.write(out, "plan.md", render.plan_md(view))
         render.write(out, "plan.json", _dump(p))
-        return {"plan": p, "plan_errors": errs, "stage": "plan"}
+        return {"plan": p, "plan_errors": errs, "stage": "plan", "corrector_rounds": 0}
 
     # ---------------- 5. tasks ----------------
     def tasks(state: SDDState):
@@ -317,7 +322,8 @@ def build_graph(
         payload = f"SPEC :\n{_dump(state['spec'])}\n\nPLAN :\n{_dump(state['plan'])}"
         t, errs = gen(llm, TaskList, prompts.TASKS, payload, lambda x: validate_tasks(x, p, spec, require_tests), max_retries)
         order = [x.id for x in t.tasks] if any("cycle" in e for e in errs) else topological_order(t)
-        return {"tasks": t.model_dump(), "tasks_errors": errs, "task_order": order, "current": 0}
+        return {"tasks": t.model_dump(), "tasks_errors": errs, "task_order": order, "current": 0,
+                "corrector_rounds": 0}
 
     # ---------------- 6. analyze (déterministe, sans LLM) ----------------
     def analyze_node(state: SDDState):
@@ -455,8 +461,69 @@ def build_graph(
             update["accepted"] = state.get("accepted", []) + [a["id"] for a in active]
         return update
 
+    # ---------------- Correcteur : patchs ciblés, revalidés par le code, puis retour au Gardien ----------------
+    def corrector(state: SDDState):
+        groups = correctable(state.get("alerts", []))
+        sources = _sources(state)
+        sources_txt = _fmt_sources(state)
+        docs = {"spec": state["spec"], "plan": state.get("plan"), "tasks": state.get("tasks")}
+        update: dict[str, Any] = {"corrector_rounds": state.get("corrector_rounds", 0) + 1}
+        notes: list[str] = []
+        for kind in ("spec", "plan", "tasks"):
+            if kind not in groups or docs[kind] is None:
+                continue
+            spec_obj = Spec.model_validate(docs["spec"])
+            if kind == "spec":
+                model_cls, ctx = Spec, _answered_block(state)
+                validate = lambda x: validate_spec(x, sources)  # noqa: E731
+            elif kind == "plan":
+                model_cls, ctx = Plan, "\n\nSPEC :\n" + _dump(docs["spec"])
+                validate = lambda x: validate_plan(x, spec_obj, sources)  # noqa: E731
+            else:
+                plan_obj = Plan.model_validate(docs["plan"])
+                model_cls, ctx = TaskList, f"\n\nSPEC :\n{_dump(docs['spec'])}\n\nPLAN :\n{_dump(docs['plan'])}"
+                validate = lambda x: validate_tasks(x, plan_obj, spec_obj, require_tests)  # noqa: E731
+            payload = correction_payload(kind, groups[kind], docs[kind], sources_txt, ctx)
+            try:
+                c, _ = gen(corrector_llm, Correction, prompts.CORRECTOR, payload, lambda x: [], 0)
+            except Exception as exc:  # le Correcteur est une aide : s'il échoue, l'humain décide
+                notes.append(f"{kind} : Correcteur indisponible ({type(exc).__name__})")
+                continue
+            doc, errs, log = apply_corrections(docs[kind], c.ops, model_cls, validate)
+            notes += [f"{kind} {'✔' if kept else '✘'} {op.op} {op.path} — {why} — {op.reason}"
+                      for op, kept, why in log] or [f"{kind} : aucune correction proposée"]
+            docs[kind] = doc
+            update[kind] = doc
+            update[f"{kind}_errors"] = errs
+        view = {**state, **update}
+        if "spec" in update:
+            render.write(out, "spec.md", render.spec_md(view, state.get("clarifications") or []))
+            render.write(out, "spec.json", _dump(update["spec"]))
+        if "plan" in update:
+            render.write(out, "plan.md", render.plan_md(view))
+            render.write(out, "plan.json", _dump(update["plan"]))
+        if "tasks" in update:
+            tl = TaskList.model_validate(update["tasks"])
+            errs = update["tasks_errors"]
+            update["task_order"] = [x.id for x in tl.tasks] if any("cycle" in e for e in errs) else topological_order(tl)
+            render.write(out, "tasks.md", render.tasks_md(view))
+            render.write(out, "tasks.json", _dump(update["tasks"]))
+        if state["stage"] == "analyze":
+            update["analysis"] = analyze(Spec.model_validate(docs["spec"]), Plan.model_validate(docs["plan"]),
+                                         TaskList.model_validate(docs["tasks"]), sources, require_tests)
+            render.write(out, "analyze.md", render.analyze_md(view, update["analysis"]))
+        entry = {"time": _now(), "type": "correcteur", "stage": state["stage"],
+                 "action": f"Correcteur, tour {update['corrector_rounds']}/{max_corrections}", "alerts": [],
+                 "answers": {}, "feedback": "", "refused": None, "justification": " ; ".join(notes)}
+        update["audit"] = [entry]
+        render.write(out, "audit.md", render.audit_md(state.get("audit", []) + [entry]))
+        return update
+
     # ---------------- routage ----------------
     def route_guardian(state: SDDState):
+        if (corrector_llm is not None and correctable(state.get("alerts", []))
+                and state.get("corrector_rounds", 0) < max_corrections):
+            return "corrector"  # d'abord le Correcteur, puis le Gardien revérifie ; l'humain en dernier recours
         if any(a["severity"] != "info" for a in state.get("alerts", [])) or state["stage"] in checkpoints:
             return "gate"
         return NEXT[state["stage"]]
@@ -494,6 +561,7 @@ def build_graph(
     # Contrôle
     g.add_node("guardian", guardian)
     g.add_node("gate", gate)
+    g.add_node("corrector", corrector)
 
     g.add_edge(START, "constitution")
     g.add_edge("constitution", "specify")
@@ -503,7 +571,9 @@ def build_graph(
     g.add_edge("tasks", "analyze")
     g.add_conditional_edges("verify", route_verify, ["fix", "guardian"])
     g.add_edge("fix", "verify")
-    g.add_conditional_edges("guardian", route_guardian, ["gate", "plan", "tasks", "implement", "apply_impl", END])
+    g.add_conditional_edges("guardian", route_guardian,
+                            ["corrector", "gate", "plan", "tasks", "implement", "apply_impl", END])
+    g.add_edge("corrector", "guardian")
     g.add_conditional_edges("gate", route_gate,
                             ["gate", "specify", "plan", "tasks", "implement", "apply_impl", "fix", END])
     g.add_conditional_edges("apply_impl", route_apply, ["implement", "verify"])

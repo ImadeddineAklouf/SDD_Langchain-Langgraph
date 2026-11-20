@@ -6,6 +6,8 @@ SDD_FALLBACK_MODEL = modèle de secours si le principal échoue (quota...)
 SDD_FALLBACK_PROVIDER = fournisseur du secours (défaut : l'autre fournisseur cloud si sa clé est présente)
 SDD_GUARDIAN_MODEL = modèle du Gardien (contrôle sémantique), idéalement différent du producteur
 SDD_GUARDIAN_SEMANTIC = 1 (défaut) | 0 : active le contrôle sémantique par LLM du Gardien
+SDD_CORRECTOR = 1 (défaut) | 0 : Correcteur (3e agent) qui corrige par patchs ce que le Gardien refuse
+SDD_CORRECTOR_MODEL = modèle du Correcteur (défaut : modèle principal) ; SDD_CORRECTOR_ROUNDS = tours (2)
 SDD_TIMEOUT  = délai maximal d'un appel au modèle, essais du client compris, en secondes (défaut 120) :
                garanti par une horloge côté Python, jamais d'attente infinie
 SDD_THINKING = niveau de réflexion des modèles Gemini 3 : minimal | low (défaut) | medium | high
@@ -94,6 +96,24 @@ def guardian_semantic_enabled() -> bool:
 def get_guardian_llm():
     """LLM du Gardien, ou None si le contrôle sémantique est désactivé (contrôles déterministes seuls)."""
     return get_llm(guardian_name()) if guardian_semantic_enabled() else None
+
+
+def corrector_name() -> str:
+    """Modèle du Correcteur : SDD_CORRECTOR_MODEL, sinon le modèle principal."""
+    return os.getenv("SDD_CORRECTOR_MODEL") or model_name()
+
+
+def corrector_enabled() -> bool:
+    return os.getenv("SDD_CORRECTOR", "1").strip().lower() not in ("0", "false", "non", "no", "")
+
+
+def corrector_rounds() -> int:
+    return int(os.getenv("SDD_CORRECTOR_ROUNDS", "2"))
+
+
+def get_corrector_llm():
+    """LLM du Correcteur, ou None s'il est désactivé (toute alerte va alors directement à l'humain)."""
+    return get_llm(corrector_name()) if corrector_enabled() else None
 
 
 def llm_timeout() -> float:

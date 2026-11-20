@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from langgraph.types import Command
 
 from .graph import SUPERVISED, build_graph
-from .llm import PROVIDERS, get_fallback_llm, get_guardian_llm, get_llm
+from .llm import PROVIDERS, corrector_rounds, get_corrector_llm, get_fallback_llm, get_guardian_llm, get_llm
 
 
 SEV = {"blocking": "⛔", "warning": "⚠️ ", "info": "ℹ️ "}
@@ -73,6 +73,7 @@ def main() -> None:
     ap.add_argument("--supervised", action="store_true",
                     help="Pause à chaque étape (sinon mode usine : pause seulement sur alerte du Gardien)")
     ap.add_argument("--no-semantic", action="store_true", help="Gardien : contrôles déterministes seulement (sans LLM)")
+    ap.add_argument("--no-corrector", action="store_true", help="Sans Correcteur : toute alerte va directement à l'humain")
     ap.add_argument("--provider", choices=PROVIDERS, default=None, help="Fournisseur (sinon SDD_PROVIDER, défaut gemini)")
     ap.add_argument("--model", default=None, help="Modèle (sinon SDD_MODEL, défaut selon le fournisseur)")
     args = ap.parse_args()
@@ -91,7 +92,9 @@ def main() -> None:
     graph = build_graph(get_llm(), args.out, args.max_retries, checkpointer=saver, require_tests=args.require_tests,
                         fallback_llm=get_fallback_llm(),
                         guardian_llm=None if args.no_semantic else get_guardian_llm(),
-                        checkpoints=SUPERVISED if args.supervised else ())
+                        checkpoints=SUPERVISED if args.supervised else (),
+                        corrector_llm=None if args.no_corrector else get_corrector_llm(),
+                        max_corrections=corrector_rounds())
     thread = args.thread or uuid.uuid4().hex[:8]
     cfg = {"configurable": {"thread_id": thread}}
     print(f"Session : {thread} (reprendre avec --thread {thread})")

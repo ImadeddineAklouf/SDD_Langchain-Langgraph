@@ -58,6 +58,14 @@ text(o, AX + 40, ay + 74, "répond, corrige, accepte", "#3b8a4a", 10, "middle")
 text(o, AX + 40, ay + 88, "le risque ou arrête", "#3b8a4a", 10, "middle")
 arrow(o, GX + GW, ay + 22, AX - 31, ay + 22, "#7a3b8f", "p")
 text(o, GX + GW + 4, ay + 14, "alerte", "#7a3b8f", 10)
+cy = ay + 104  # le Correcteur (3e agent) : patchs ciblés, puis le Gardien revérifie
+box(o, AX - 30, cy, 140, 34, "llm", "corrector")
+arrow(o, GX + GW, cy + 10, AX - 31, cy + 10, "#c9731d")
+arrow(o, AX - 30, cy + 26, GX + GW + 1, cy + 26, "#c9731d")
+text(o, GX + GW + 4, cy + 4, "corrigeable", "#c9731d", 9.5)
+text(o, GX + GW + 4, cy + 42, "revérifie", "#c9731d", 9.5)
+text(o, AX + 48, cy + 58, "patchs revalidés par le code", "#c9731d", 10, "middle")
+text(o, AX + 48, cy + 72, "(tours bornés, puis gate)", "#c9731d", 10, "middle")
 ry = y["specify"] - 8
 o.append(f'<path d="M{AX + 40},{ay} V{ry} H{X + BW - 12} V{y["specify"] - 1}" fill="none" stroke="#3b8a4a" '
          f'stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a)"/>')

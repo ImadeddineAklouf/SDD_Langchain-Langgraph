@@ -34,6 +34,7 @@ NODE_TO_STEP = {
     "fix": "implement",
     "guardian": "guardian",
     "gate": "guardian",
+    "corrector": "guardian",  # côté contrôle : le Correcteur travaille avec le Gardien
 }
 STAGE_TITLES = {
     "spec": "Spécification (specify + clarify)",
@@ -85,6 +86,10 @@ def summarize(node: str, update: dict[str, Any] | None) -> str:
         if not n["blocking"] and not n["warning"]:
             return f"aucune incohérence ({n['info']} info)"
         return f"⛔ {n['blocking']} bloquante(s), ⚠️ {n['warning']} avertissement(s) : pause"
+    if node == "corrector":
+        a = (u.get("audit") or [{}])[-1].get("justification", "")
+        kept = a.count(" ✔ ")
+        return f"🩹 {kept} correction(s) gardée(s) sur {kept + a.count(' ✘ ')} proposée(s), le Gardien revérifie"
     if node == "gate":
         return f"décision humaine : {ACTIONS.get(u.get('decision', ''), u.get('decision', '?'))}"
     return ""
