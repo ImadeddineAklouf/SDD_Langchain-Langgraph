@@ -347,14 +347,46 @@ def test_fallback_model_used_when_primary_fails():
         def with_structured_output(self, schema, **_kw):
             from langchain_core.runnables import RunnableLambda
 
+            class QuotaError(Exception):
+                status_code = 429
+
             def boom(_):
-                raise RuntimeError("429 quota atteint")
+                raise QuotaError("429 quota atteint")
 
             return RunnableLambda(boom)
 
     backup = FakeLLM({"Spec": [GOOD_SPEC]})
     spec, errs = generate(Broken(), Spec, "sys", "x", lambda s: validate_spec(s, sources()), 0, fallback_llm=backup)
     assert errs == [] and backup.calls["Spec"] == 1
+
+
+def test_hard_deadline_when_model_never_answers(monkeypatch):
+    """Un modèle qui ne rend jamais la main : délai dur côté Python, puis bascule sur le secours."""
+    import threading
+
+    import pytest
+    import time
+
+    from langchain_core.runnables import RunnableLambda
+
+    from sdd.llm import CallTimeout, generate, is_api_error
+
+    monkeypatch.setenv("SDD_TIMEOUT", "0.5")
+    release = threading.Event()
+
+    class Hanging:
+        def with_structured_output(self, schema, **_kw):
+            return RunnableLambda(lambda _: release.wait(30))
+
+    t0 = time.monotonic()
+    with pytest.raises(CallTimeout) as err:
+        generate(Hanging(), Spec, "sys", "x", lambda s: [], 0)
+    assert time.monotonic() - t0 < 3 and is_api_error(err.value)
+
+    backup = FakeLLM({"Spec": [GOOD_SPEC]})
+    spec, errs = generate(Hanging(), Spec, "sys", "x", lambda s: validate_spec(s, sources()), 0, fallback_llm=backup)
+    assert errs == [] and backup.calls["Spec"] == 1 and time.monotonic() - t0 < 5
+    release.set()
 
 
 def test_constitution_rule_cannot_be_functional():

@@ -1067,6 +1067,15 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
 - **La rangée des étapes avance en direct** dans l'interface : elle est redessinée à chaque nœud terminé, au lieu
   de rester sur « ○ » jusqu'à la fin du run, ce qui donnait l'impression que rien ne démarrait.
 
+- **Un délai dur, garanti par Python.** Un nouvel essai réel est encore resté bloqué sur « Spec : appel au modèle
+  (essai 1/4)… ». Reproduction : face à un serveur qui envoie quelques octets de temps en temps sans jamais finir
+  sa réponse, le client HTTP ne déclenche **jamais** son `timeout` (il mesure le silence entre deux octets, pas la
+  durée totale), et il refait plusieurs essais. Désormais, `generate()` lance chaque appel dans un fil séparé
+  (`invoke_with_deadline`, avec le contexte LangGraph copié) et n'attend jamais plus de `SDD_TIMEOUT` secondes,
+  essais du client compris. Au-delà, l'appel est abandonné (`CallTimeout`) : le workflow **bascule sur le modèle de
+  secours** pour le reste de l'étape, ou, sans secours, s'arrête avec un message clair et reste reprenable. Le test
+  `test_hard_deadline_when_model_never_answers` simule un modèle qui ne répond jamais.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).
@@ -1250,7 +1259,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**45 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**46 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1340,7 +1349,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 45 tests hors ligne, sans clé
+python -m pytest                   # 46 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 
@@ -1407,7 +1416,7 @@ Reprendre une session : `sdd examples/brief.md --out out --thread <identifiant>`
 | `--model` / `SDD_MODEL` | nom du modèle |
 | `SDD_FALLBACK_MODEL` | modèle de secours (vide pour désactiver) |
 | `SDD_FALLBACK_PROVIDER` | fournisseur du secours (défaut pour Gemini : `groq` si `GROQ_API_KEY` est présente) |
-| `SDD_TIMEOUT` | délai maximal d'un appel au modèle, en secondes (120) |
+| `SDD_TIMEOUT` | délai maximal d'un appel au modèle, essais compris, garanti côté Python (120 s) |
 | `SDD_THINKING` | réflexion des modèles Gemini 3 : `minimal`, `low` (défaut), `medium`, `high` |
 | `SDD_NUM_CTX` | contexte Ollama en tokens (16384) |
 | `SDD_STRUCTURED_METHOD` | `json_schema`, `function_calling`, `json_mode` |
