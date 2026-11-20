@@ -202,10 +202,17 @@ def render() -> None:
         """Rangée des étapes, redessinée à chaque nœud terminé : elle avance en direct pendant un run."""
         reached = {NODE_TO_STEP.get(n) for n, _ in ss.log}
         current = NODE_TO_STEP.get(ss.log[-1][0]) if ss.log else None
+        if running:
+            # pendant un run, l'étape en cours est celle qui SUIT la dernière étape terminée (le graphe ne
+            # signale un nœud qu'une fois fini) : on l'affiche ⏳ dès qu'elle démarre
+            order = [k for k, _ in STEPS if k != "guardian"]
+            main = [NODE_TO_STEP.get(n) for n, _ in ss.log if NODE_TO_STEP.get(n) in order]
+            i = order.index(main[-1]) + 1 if main else 0
+            current = order[i] if i < len(order) and order[i] not in reached else None
         with steps_box.container():
             cols = st.columns(len(STEPS))
             for col, (key, label) in zip(cols, STEPS):
-                done = key in reached and (key != current or ss.finished or running)
+                done = key in reached and (key != current or ss.finished)
                 icon = "✅" if done else ("⏳" if key == current else "○")
                 col.markdown(f"**{icon} {label}**")
 
@@ -222,6 +229,7 @@ def render() -> None:
         graph = _graph(ss.thread, max_retries, require_tests, factory)
         with st.status(label, expanded=True) as status:
             live = status.empty()  # progression en direct : appel au modèle en cours, durée, validation
+            draw_steps(running=True)
 
             def on_progress(msg: str) -> None:
                 live.caption("⏳ " + msg)
