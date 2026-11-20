@@ -302,3 +302,69 @@ def analyze(spec: Spec, plan: Plan, tasks: TaskList, sources: list[SourceStateme
     if unanswered:
         warnings.append(f"Questions ouvertes non résolues dans la spec : {', '.join(unanswered)}.")
     return {"errors": errors, "warnings": warnings}
+
+
+# --------------------------------------------------------------------------- #
+def repair_spec(spec: Spec, sources: list[SourceStatement], min_grounding: float = 0.7) -> tuple[Spec, list[str]]:
+    """Réparation DÉTERMINISTE d'une spec que le modèle n'a pas su corriger (rien n'est inventé) :
+
+    1. un énoncé mal ancré reçoit la citation des sources qui contiennent ses termes manquants
+       (souvent la réponse humaine A-xxx qu'il reprend sans la citer) ;
+    2. une réponse humaine jamais citée devient une contrainte dont l'énoncé est la source mot pour mot ;
+    3. une phrase du brief non couverte devient une exigence dont l'énoncé est la phrase mot pour mot.
+
+    Renvoie la spec réparée et la liste des réparations (tracées dans l'audit)."""
+    from .models import Citation, Requirement
+
+    src = {s.id: s for s in sources}
+    data = spec.model_copy(deep=True)
+    notes: list[str] = []
+
+    def anchor(where: str, text: str, citations: list) -> None:
+        for _ in range(4):
+            quotes = [src[c.source_id].text for c in citations if c.source_id in src]
+            ratio, unknown = grounding_ratio(text, quotes)
+            if ratio >= min_grounding or not unknown:
+                return
+            have = {c.source_id for c in citations}
+            best, gain = None, 0
+            for s in sources:
+                if s.id in have:
+                    continue
+                g = len(unknown - grounding_ratio(" ".join(unknown), [s.text])[1])
+                if g > gain:
+                    best, gain = s, g
+            if best is None:
+                return
+            citations.append(Citation(source_id=best.id, quote=best.text))
+            notes.append(f"{where} : citation de {best.id} ajoutée (elle contient les termes {sorted(unknown)[:6]})")
+
+    for r in data.requirements:
+        anchor(r.id, r.statement, r.citations)
+        for i, ac in enumerate(r.acceptance_criteria, 1):
+            anchor(f"{r.id}/CA{i}", ac.text, ac.citations)
+
+    def cited() -> set[str]:
+        ids = {c.source_id for r in data.requirements for c in r.citations}
+        ids |= {c.source_id for r in data.requirements for ac in r.acceptance_criteria for c in ac.citations}
+        return ids
+
+    def next_id() -> str:
+        nums = [int(m.group(1)) for r in data.requirements if (m := re.match(r"REQ-(\d+)$", r.id))]
+        return f"REQ-{max(nums, default=0) + 1:03d}"
+
+    for s in sources:
+        if s.origin == "answer" and s.id not in cited():
+            rid = next_id()
+            data.requirements.append(Requirement(id=rid, kind="constraint", statement=s.text,
+                                                 citations=[Citation(source_id=s.id, quote=s.text)]))
+            notes.append(f"{rid} : contrainte ajoutée, reprenant mot pour mot la réponse humaine {s.id}")
+    questioned = {sid for q in data.open_questions for sid in q.source_ids}
+    for s in sources:
+        if s.origin == "brief" and s.id not in cited() and s.id not in questioned:
+            rid = next_id()
+            kind = "functional" if re.search(r"\bpeu(t|vent)\b", s.text, re.I) else "constraint"
+            data.requirements.append(Requirement(id=rid, kind=kind, statement=s.text,
+                                                 citations=[Citation(source_id=s.id, quote=s.text)]))
+            notes.append(f"{rid} : exigence ajoutée, reprenant mot pour mot la phrase du brief {s.id}")
+    return data, notes

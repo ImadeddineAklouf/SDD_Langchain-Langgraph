@@ -6,7 +6,7 @@ from langgraph.types import Command
 
 from sdd.graph import build_graph
 from sdd.ingest import split_statements
-from sdd.models import Clarifications, Implementation, Plan, Spec, TaskList
+from sdd.models import Clarifications, Implementation, Plan, SourceStatement, Spec, TaskList
 from sdd.validators import validate_plan, validate_spec, validate_tasks
 
 BRIEF = """# Todo
@@ -207,15 +207,20 @@ def test_typed_answers_are_never_lost_even_with_continue(tmp_path):
     assert res["audit"][-2]["action"] == "answer"
 
 
-def test_ignored_answer_is_blocking(tmp_path):
-    """Piège : la spec régénérée ne reprend pas la réponse humaine."""
+def test_ignored_answer_is_repaired_and_audited(tmp_path):
+    """Piège : la spec régénérée ne reprend pas la réponse humaine. Elle n'est jamais perdue : la réparation
+    déterministe l'ajoute mot pour mot comme contrainte, et c'est tracé dans l'audit."""
     llm = FakeLLM({"Spec": [SPEC_Q, GOOD_SPEC, GOOD_SPEC], "Clarifications": [Clarifications(), Clarifications()]})
-    g = build_graph(llm, tmp_path, max_retries=1, checkpointer=MemorySaver())
+    g = build_graph(llm, tmp_path, max_retries=1, checkpointer=MemorySaver(), checkpoints=("spec",))
     cfg = {"configurable": {"thread_id": "t"}}
     run_until_pause(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
     res, pause = run_until_pause(g, Command(resume={"action": "answer", "answers": {"Q-001": "texte libre"}}), cfg)
-    assert pause["blocking"] and [a["code"] for a in pause["alerts"]] == ["REPONSE_IGNOREE"]
-    assert "A-001" in pause["alerts"][0]["refs"] and pause["alerts"][0]["redo"] == "specify"
+    assert pause["kind"] == "checkpoint" and not pause["blocking"]
+    added = res["spec"]["requirements"][-1]
+    assert added["kind"] == "constraint" and added["citations"][0]["source_id"] == "A-001"
+    assert "texte libre" in added["statement"]
+    assert any(e["type"] == "réparation" and "A-001" in e["justification"] for e in res["audit"])
+    assert "🔧" in (tmp_path / "audit.md").read_text()
 
 
 def test_implementation_cannot_start_while_a_question_is_open(tmp_path):
@@ -435,3 +440,30 @@ def test_clarify_never_reasks_answered_questions_and_stops_after_round_cap(tmp_p
     assert any(e["type"] == "plafond" and "couleur" in e["justification"] for e in res["audit"])
     payload_sources = [s["id"] for s in res["sources"] if s["origin"] == "answer"]
     assert payload_sources == ["A-001", "A-002"]
+
+
+def test_spec_repaired_deterministically_when_model_forgets_answers_and_brief_lines(tmp_path):
+    """Essai réel : après 10 réponses, la spec oubliait des A-xxx, des phrases du brief, et un énoncé
+    reprenait une réponse sans la citer. La réparation déterministe corrige sans rien inventer."""
+    from sdd.validators import repair_spec
+
+    sources = split_statements(BRIEF, "B", "brief") + [
+        SourceStatement(id="A-001", origin="answer",
+                        text="Quel ordre de tri ? Réponse : tri par date croissante, à date égale par identifiant."),
+        SourceStatement(id="A-002", origin="answer", text="Quel identifiant ? Réponse : entier attribué automatiquement."),
+    ]
+    spec = Spec.model_validate({"requirements": [
+        {"id": "REQ-001", "kind": "functional",
+         "statement": "L'utilisateur peut ajouter une tâche avec un titre, triée par date croissante puis identifiant.",
+         "citations": [cite("B-001", "ajouter une tâche avec un titre")]},
+    ]})
+    errs = validate_spec(spec, sources)
+    assert any("A-002" in e for e in errs) and any("B-002" in e for e in errs) and any("REQ-001:" in e for e in errs)
+    fixed, notes = repair_spec(spec, sources)
+    assert validate_spec(fixed, sources) == []
+    req1 = fixed.requirements[0]
+    assert "A-001" in {c.source_id for c in req1.citations}  # l'énoncé est ancré par la réponse qu'il reprend
+    added = {r.citations[0].source_id: r for r in fixed.requirements[1:]}
+    assert added["A-002"].kind == "constraint" and added["A-002"].statement == sources[-1].text  # mot pour mot
+    assert added["B-002"].statement == "Les tâches sont sauvegardées dans un fichier JSON local."
+    assert len(notes) == 3

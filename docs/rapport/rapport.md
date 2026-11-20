@@ -505,6 +505,22 @@ Le validateur `validate_spec` vérifie :
 Quand `specify` est relancé après une réponse ou une correction, le LLM reçoit les nouvelles sources `A-xxx` /
 `F-xxx`, et le prompt lui impose de citer chaque réponse.
 
+### Réparation déterministe de la spec
+
+Un essai réel avec dix réponses humaines a montré la limite de la correction par le modèle : à chaque nouvel essai,
+il devait réécrire toute la spec, et il oubliait toujours quelque chose (huit réponses `A-xxx` non citées, quatre
+phrases du brief non couvertes, une exigence qui reprenait une réponse sans la citer). Après les corrections
+automatiques, `specify` applique donc `repair_spec`, une réparation **déterministe** qui n'invente rien :
+
+1. un énoncé mal ancré reçoit la citation de la source qui contient ses termes manquants (souvent la réponse
+   `A-xxx` qu'il reprend) ;
+2. une réponse humaine jamais citée devient une **contrainte** dont l'énoncé est la réponse **mot pour mot** ;
+3. une phrase du brief non couverte devient une exigence dont l'énoncé est la phrase **mot pour mot**
+   (`functional` si elle dit « peut », sinon `constraint`).
+
+La spec réparée n'est retenue que si elle a moins d'erreurs. Chaque réparation est tracée dans `audit.md`
+(« 🔧 réparation automatique de la spec »). Ce qui reste invalide est toujours bloqué par le Gardien.
+
 ## 7.3 `clarify` (LLM : des questions, jamais de réponses)
 
 Le LLM ne produit que des questions (schéma `Clarifications`, 5 au maximum) et ne modifie pas la spec. Le code
@@ -1284,7 +1300,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**49 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**50 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1374,7 +1390,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 49 tests hors ligne, sans clé
+python -m pytest                   # 50 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 
