@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+import re
 import threading
 import time
 
@@ -181,6 +182,13 @@ def explain_error(exc: Exception) -> str:
         key = API_KEYS.get(provider(), "la clé API")
         return f"Clé API refusée : vérifiez {key} dans le fichier .env. Détail : {detail}"
     if isinstance(exc, ModelRateLimitError) or status == 429:
+        if rate_limit_wait(exc) is not None:
+            return ("Limite par minute du fournisseur toujours atteinte après plusieurs attentes (modèle de secours "
+                    "compris). Cliquez sur « Reprendre » dans une minute, ou choisissez un autre fournisseur "
+                    f"(Gemini) dans la barre latérale. Détail : {detail}")
+        if _DAILY.search(str(exc)):
+            return ("Quota JOURNALIER gratuit du fournisseur épuisé (modèle de secours compris). Choisissez un autre "
+                    f"fournisseur ou modèle dans la barre latérale, ou réessayez demain. Détail : {detail}")
         return ("Quota gratuit du fournisseur atteint (modèle de secours compris). Attendez un peu, ou choisissez "
                 f"un autre modèle ou fournisseur dans la barre latérale. Détail : {detail}")
     if isinstance(exc, ModelTimeoutError) or any("Timeout" in c.__name__ for c in type(exc).__mro__):
@@ -207,6 +215,38 @@ def structured_method() -> str:
     au schéma JSON (le modèle ne peut pas répondre en texte libre). Gemini reçoit le schéma dans
     `response_json_schema`, Ollama dans `format` : dans les deux cas la génération est contrainte."""
     return os.getenv("SDD_STRUCTURED_METHOD", "json_schema")
+
+
+_WAIT = re.compile(r"(?:try again|retry) in\s*([\d.]+)\s*(ms|s|m)\b|retry[_ ]?delay\W+([\d.]+)\s*s", re.I)
+_DAILY = re.compile(r"per day|\(TPD\)|\(RPD\)|PerDay|daily", re.I)
+MAX_RATE_WAIT = 90.0  # au-delà, ce n'est plus une limite « par minute »
+
+
+def rate_limit_wait(exc: Exception) -> float | None:
+    """Secondes à attendre si l'erreur est une limite PAR MINUTE (429 « try again in 4.68s »), sinon None.
+
+    Une limite journalière (tokens/requêtes par jour) n'est pas une attente courte : c'est un quota épuisé.
+    Le délai vient de l'en-tête retry-after s'il existe, sinon du message du fournisseur (Groq, Gemini)."""
+    from langchain_core.exceptions import ModelRateLimitError
+
+    text = str(exc)
+    if not (isinstance(exc, ModelRateLimitError) or getattr(exc, "status_code", None) == 429
+            or "429" in text or "RESOURCE_EXHAUSTED" in text):
+        return None
+    if _DAILY.search(text):
+        return None
+    wait = None
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    try:
+        wait = float(headers.get("retry-after"))
+    except (TypeError, ValueError):
+        m = _WAIT.search(text)
+        if m:
+            value, unit = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), "s")
+            wait = float(value) * {"ms": 0.001, "s": 1, "m": 60}[unit.lower()]
+    if wait is None:  # 429 sans délai indiqué : traité comme un quota épuisé (bascule sur le secours)
+        return None
+    return wait + 1.0 if wait <= MAX_RATE_WAIT else None
 
 
 class CallTimeout(TimeoutError):
@@ -262,6 +302,7 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     obj, errors = None, ["Aucune sortie."]
     step = schema.__name__
     deadline = llm_timeout()
+    waits = 0
     for attempt in range(1, max_retries + 2):
         answered = False
         while not answered:
@@ -275,6 +316,13 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
                 obj = out if isinstance(out, schema) else schema.model_validate(out)
                 errors = validate(obj)
             except Exception as exc:
+                wait = rate_limit_wait(exc)
+                if wait is not None and waits < 6:  # limite par minute : on patiente puis on réessaie
+                    waits += 1
+                    _progress(f"{step} : limite par minute du modèle {label} atteinte, nouvel essai dans "
+                              f"{wait:.0f} s ({waits}/6)…")
+                    time.sleep(wait)
+                    continue
                 if is_api_error(exc):  # clé, modèle introuvable, réseau, délai, quota : inutile de redemander
                     _progress(f"{step} : échec du modèle {label} après {time.monotonic() - t0:.0f} s : "
                               f"{type(exc).__name__} {str(exc)[:120]}")

@@ -129,3 +129,48 @@ def test_secours_chez_l_autre_fournisseur(monkeypatch):
     monkeypatch.delenv("SDD_FALLBACK_MODEL")
     monkeypatch.delenv("GROQ_API_KEY")
     assert llm.fallback_provider() == "gemini" and llm.get_fallback_llm() is None
+
+
+def test_rate_limit_per_minute_waits_daily_quota_stops():
+    from langchain_core.exceptions import ModelRateLimitError
+
+    class Groq429(Exception):
+        status_code = 429
+
+    tpm = Groq429("Error code: 429 - Rate limit reached for model openai/gpt-oss-120b on tokens per minute (TPM): "
+                  "Limit 8000, Used 3634, Requested 4990. Please try again in 4.68s.")
+    assert abs(llm.rate_limit_wait(tpm) - 5.68) < 0.01
+    assert llm.rate_limit_wait(Groq429("... try again in 640ms")) < 2
+    tpd = Groq429("Rate limit reached on tokens per day (TPD): Limit 200000. Please try again in 7m12s.")
+    assert llm.rate_limit_wait(tpd) is None and "JOURNALIER" in llm.explain_error(tpd)
+    assert llm.rate_limit_wait(ModelRateLimitError("429 RESOURCE_EXHAUSTED retryDelay: '30s'")) == 31
+    assert llm.rate_limit_wait(Groq429("Please try again in 3m0s")) is None  # trop long : pas une limite par minute
+    assert llm.rate_limit_wait(ValueError("schéma invalide")) is None
+
+
+def test_generate_waits_on_per_minute_limit(monkeypatch):
+    from langchain_core.runnables import RunnableLambda
+
+    from sdd.models import Spec
+
+    slept = []
+    monkeypatch.setattr(llm.time, "sleep", slept.append)
+
+    class Groq429(Exception):
+        status_code = 429
+
+    calls = {"n": 0}
+
+    class Limited:
+        def with_structured_output(self, schema, **_kw):
+            def run(_):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise Groq429("tokens per minute (TPM). Please try again in 4.68s.")
+                return {"invented": None}
+            return RunnableLambda(run)
+
+    import pytest
+    with pytest.raises(Exception):  # la 2e réponse est invalide pour le schéma : peu importe ici
+        llm.generate(Limited(), Spec, "s", "x", lambda o: [], 0)
+    assert calls["n"] == 2 and len(slept) == 1 and 5 < slept[0] < 6

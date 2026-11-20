@@ -1076,6 +1076,14 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   secours** pour le reste de l'étape, ou, sans secours, s'arrête avec un message clair et reste reprenable. Le test
   `test_hard_deadline_when_model_never_answers` simule un modèle qui ne répond jamais.
 
+- **Limite par minute ≠ quota épuisé.** Le run suivant s'est arrêté sur une erreur 429 de Groq : « tokens per
+  minute (TPM) : Limit 8000, Used 3634, Requested 4990. Please try again in 4.68s ». Une requête de Specify pèse
+  environ 5 000 tokens, donc le tier gratuit n'en accepte qu'une par minute environ. Ce n'était pas un quota épuisé.
+  Désormais, `rate_limit_wait()` lit le délai demandé (en-tête `retry-after`, ou « try again in … » / `retryDelay`
+  dans le message). Pour une limite par minute (délai d'au plus 90 s), `generate()` affiche « limite par minute
+  atteinte, nouvel essai dans 6 s » et **patiente puis réessaie** (6 fois au plus par étape). Une limite **par
+  jour** (TPD, RPD) reste un quota épuisé : bascule sur le secours, ou message clair.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).
@@ -1259,7 +1267,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**46 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**48 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1349,7 +1357,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 46 tests hors ligne, sans clé
+python -m pytest                   # 48 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 
