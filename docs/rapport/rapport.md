@@ -1155,6 +1155,11 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   atteinte, nouvel essai dans 6 s » et **patiente puis réessaie** (6 fois au plus par étape). Une limite **par
   jour** (TPD, RPD) reste un quota épuisé : bascule sur le secours, ou message clair.
 
+- **Afficher toutes les erreurs.** Quand le modèle principal (Gemini) et le secours (Groq) échouaient tous les
+  deux, seule l'erreur du secours s'affichait : on croyait que le fournisseur choisi n'était pas utilisé.
+  `generate()` lève désormais `AllModelsFailed`, qui garde les deux erreurs, et l'interface les explique une par
+  une, avec le nom de chaque modèle.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).
@@ -1338,7 +1343,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**57 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**58 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1428,7 +1433,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 57 tests hors ligne, sans clé
+python -m pytest                   # 58 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 

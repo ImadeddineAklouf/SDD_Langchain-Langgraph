@@ -174,3 +174,33 @@ def test_generate_waits_on_per_minute_limit(monkeypatch):
     with pytest.raises(Exception):  # la 2e réponse est invalide pour le schéma : peu importe ici
         llm.generate(Limited(), Spec, "s", "x", lambda o: [], 0)
     assert calls["n"] == 2 and len(slept) == 1 and 5 < slept[0] < 6
+
+
+def test_both_errors_shown_when_primary_and_fallback_fail():
+    """Gemini choisi, Groq en secours, les deux en échec : on voit les DEUX erreurs, pas seulement Groq."""
+    import pytest
+    from langchain_core.runnables import RunnableLambda
+
+    from sdd.models import Spec
+
+    class E(Exception):
+        def __init__(self, msg, code):
+            super().__init__(msg)
+            self.status_code = code
+
+    class M:
+        def __init__(self, name, exc):
+            self.model, self.exc = name, exc
+
+        def with_structured_output(self, schema, **_kw):
+            def boom(_):
+                raise self.exc
+            return RunnableLambda(boom)
+
+    primary = M("gemini-3.8-flash", E("404 model not found", 404))
+    backup = M("openai/gpt-oss-120b", E("Rate limit ... tokens per day (TPD) ... try again in 13m58s", 429))
+    with pytest.raises(llm.AllModelsFailed) as err:
+        llm.generate(primary, Spec, "s", "x", lambda o: [], 0, fallback_llm=backup)
+    msg = llm.explain_error(err.value)
+    assert "gemini-3.8-flash" in msg and "introuvable" in msg
+    assert "openai/gpt-oss-120b" in msg and "JOURNALIER" in msg
