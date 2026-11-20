@@ -84,7 +84,7 @@ def render() -> None:
 
     from langgraph.types import Command
 
-    from sdd.runner import NODE_TO_STEP, STAGE_TITLES, STEPS, advance, summarize
+    from sdd.runner import NODE_TO_STEP, STAGE_TITLES, STEPS, advance, current_pending, summarize
 
     st.cache_resource(load_dotenv)()  # une seule fois par processus : les choix de la barre latérale priment ensuite
     from sdd.llm import setup_logging
@@ -243,13 +243,20 @@ def render() -> None:
             except Exception as exc:  # erreur API (clé, modèle, quota, réseau) : la session reste reprenable
                 from sdd.llm import explain_error
 
-                ss.error = (f"{explain_error(exc)}\n\nLa session `{ss.thread}` est conservée : corrigez puis cliquez "
-                            "sur « Reprendre là où le workflow s'est arrêté ».")
+                ss.error = (f"{explain_error(exc)}\n\nLa session `{ss.thread}` est conservée, vos réponses aussi : "
+                            "corrigez puis cliquez sur « Reprendre là où le workflow s'est arrêté ».")
+                # le graphe n'est plus en pause : on n'affiche plus l'ancienne boîte d'alertes (bug : les mêmes
+                # questions réapparaissaient et une 2e saisie partait vers un graphe qui n'attendait rien)
+                ss.pending = current_pending(graph, _cfg(ss.thread))
                 status.update(label="Erreur", state="error")
         st.rerun()
 
     def run_resume(review: dict, label: str) -> None:
-        run(Command(resume=review), label)
+        graph = _graph(ss.thread, max_retries, require_tests, factory)
+        if current_pending(graph, _cfg(ss.thread)) is None:  # plus de pause en attente : simple reprise
+            run(None, "Reprise depuis le dernier checkpoint…")
+        else:
+            run(Command(resume=review), label)
 
     # ------------------------------ 1. saisie ------------------------------
     if not ss.thread:

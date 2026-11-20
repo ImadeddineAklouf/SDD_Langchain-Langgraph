@@ -110,6 +110,14 @@ def advance(graph, inp, cfg: dict, on_update: Callable[[str, dict], None] | None
     return snap.interrupts[0].value if snap.interrupts else None
 
 
+def current_pending(graph, cfg: dict) -> dict | None:
+    """Pause RÉELLEMENT en attente dans le checkpoint (ou None). Après une erreur en cours de run, le graphe
+    n'est plus en pause : il ne faut surtout pas réafficher l'ancienne boîte d'alertes (les réponses saisies
+    une seconde fois seraient envoyées à un graphe qui n'attend plus de décision)."""
+    snap = graph.get_state(cfg)
+    return snap.interrupts[0].value if snap.interrupts else None
+
+
 def resume(graph, cfg: dict, review: dict, on_update=None, on_progress=None) -> dict | None:
     """Transmet la décision humaine (continue / answer / correct / accept_risk / abort) à la porte du Gardien."""
     return advance(graph, Command(resume=review), cfg, on_update, on_progress)

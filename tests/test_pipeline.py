@@ -1,4 +1,5 @@
 """Tests sans réseau : un faux LLM renvoie des sorties scriptées."""
+import pytest
 from collections import defaultdict
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -480,3 +481,34 @@ def test_repair_reclassifies_constitution_only_functional_requirement():
     assert any("REQ-003" in e and "constitution" in e for e in validate_spec(spec, sources))
     fixed, notes = repair_spec(spec, sources)
     assert validate_spec(fixed, sources) == [] and fixed.requirements[-1].kind == "constraint"
+
+
+def test_error_after_answers_keeps_answers_and_no_stale_pause(tmp_path):
+    """Bug réel : erreur fournisseur juste après « Répondre » -> l'UI réaffichait les mêmes questions, et une
+    2e saisie partait vers un graphe qui n'attendait plus rien. Les réponses sont pourtant enregistrées."""
+    from sdd.runner import advance, current_pending
+
+    class Quota(Exception):
+        status_code = 429
+
+    llm = FakeLLM({"Spec": [SPEC_Q], "Clarifications": [Clarifications(), Clarifications()]})
+    g = build_graph(llm, tmp_path, checkpointer=MemorySaver(), checkpoints=("spec",))
+    cfg = {"configurable": {"thread_id": "t"}}
+    pause = advance(g, {"brief": BRIEF, "constitution": CONSTITUTION}, cfg)
+    assert [q["question"] for q in pause["open_questions"]] == ["Quel format de titre ?"]
+
+    def boom(_):
+        raise Quota("429 quota")
+    llm.queues["Spec"] = []
+    from langchain_core.runnables import RunnableLambda
+    orig = llm.with_structured_output
+    llm.with_structured_output = lambda schema, **kw: RunnableLambda(boom) if schema is Spec else orig(schema, **kw)
+    with pytest.raises(Quota):
+        advance(g, Command(resume={"action": "answer", "answers": {"Q-001": "texte libre"}}), cfg)
+    assert current_pending(g, cfg) is None  # plus de boîte d'alertes périmée
+    assert any(s["id"] == "A-001" for s in g.get_state(cfg).values["sources"])  # réponse conservée
+
+    llm.with_structured_output = orig
+    llm.queues["Spec"] = [spec_citing_answer()]
+    pause = advance(g, None, cfg)  # « Reprendre là où le workflow s'est arrêté »
+    assert pause["kind"] == "checkpoint" and pause["open_questions"] == []
