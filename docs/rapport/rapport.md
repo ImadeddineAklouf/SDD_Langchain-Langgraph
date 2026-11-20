@@ -518,7 +518,10 @@ automatiques, `specify` applique donc `repair_spec`, une réparation **détermin
 3. une phrase du brief non couverte devient une exigence dont l'énoncé est la phrase **mot pour mot**
    (`functional` si elle dit « peut », sinon `constraint`).
 
-La spec réparée n'est retenue que si elle a moins d'erreurs. Chaque réparation est tracée dans `audit.md`
+Une exigence issue uniquement de la constitution mais classée `functional` est reclassée en `constraint`. Pour
+limiter les oublis à la source, le prompt de `specify` se termine aussi par la liste explicite des identifiants à
+couvrir (« À COUVRIR OBLIGATOIREMENT : B-001, …, B-026 » et « À CITER OBLIGATOIREMENT : A-001, … »). La spec réparée
+n'est retenue que si elle a moins d'erreurs. Chaque réparation est tracée dans `audit.md`
 (« 🔧 réparation automatique de la spec »). Ce qui reste invalide est toujours bloqué par le Gardien.
 
 ## 7.3 `clarify` (LLM : des questions, jamais de réponses)
@@ -1300,7 +1303,7 @@ Il s'insère dans la chaîne LCEL exactement comme un vrai modèle, y compris po
 - `test_llm.py` : Gemini par défaut (température 0, seed), JSON Schema transmis à Gemini, Groq et Ollama
   sélectionnables, erreurs du fournisseur expliquées.
 
-Commande : `python -m pytest` (**50 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
+Commande : `python -m pytest` (**51 tests**, quelques secondes ; un test Ollama est sauté si le paquet optionnel
 n'est pas installé).
 
 # 16. Exécutions réelles et enseignements
@@ -1390,7 +1393,7 @@ Puis mettre à jour l'environnement et vérifier :
 ```bash
 source .venv/bin/activate          # ou : python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui]"
-python -m pytest                   # 50 tests hors ligne, sans clé
+python -m pytest                   # 51 tests hors ligne, sans clé
 sdd-ui                             # http://localhost:8501
 ```
 

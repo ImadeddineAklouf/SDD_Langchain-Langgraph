@@ -340,6 +340,10 @@ def repair_spec(spec: Spec, sources: list[SourceStatement], min_grounding: float
             notes.append(f"{where} : citation de {best.id} ajoutée (elle contient les termes {sorted(unknown)[:6]})")
 
     for r in data.requirements:
+        origins = {src[c.source_id].origin for c in r.citations if c.source_id in src}
+        if r.kind == "functional" and origins == {"constitution"}:
+            r.kind = "constraint"  # une règle de la constitution n'est pas une fonctionnalité
+            notes.append(f"{r.id} : reclassée en contrainte (issue uniquement de la constitution)")
         anchor(r.id, r.statement, r.citations)
         for i, ac in enumerate(r.acceptance_criteria, 1):
             anchor(f"{r.id}/CA{i}", ac.text, ac.citations)
