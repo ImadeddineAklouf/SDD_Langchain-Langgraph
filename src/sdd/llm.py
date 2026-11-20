@@ -6,7 +6,8 @@ SDD_FALLBACK_MODEL = modèle de secours si le principal échoue (quota...)
 SDD_FALLBACK_PROVIDER = fournisseur du secours (défaut : l'autre fournisseur cloud si sa clé est présente)
 SDD_GUARDIAN_MODEL = modèle du Gardien (contrôle sémantique), idéalement différent du producteur
 SDD_GUARDIAN_SEMANTIC = 1 (défaut) | 0 : active le contrôle sémantique par LLM du Gardien
-SDD_TIMEOUT  = délai maximal d'un appel au modèle, en secondes (défaut 120) : jamais d'attente infinie
+SDD_TIMEOUT  = délai maximal d'un appel au modèle, essais du client compris, en secondes (défaut 120) :
+               garanti par une horloge côté Python, jamais d'attente infinie
 SDD_THINKING = niveau de réflexion des modèles Gemini 3 : minimal | low (défaut) | medium | high
 SDD_NUM_CTX  = taille du contexte Ollama en tokens (défaut 16384)
 SDD_STRUCTURED_METHOD = json_schema (défaut) | function_calling | json_mode
@@ -14,8 +15,10 @@ OLLAMA_HOST  = adresse du serveur Ollama (défaut http://localhost:11434)
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
+import threading
 import time
 
 log = logging.getLogger("sdd")
@@ -111,11 +114,11 @@ def get_llm(model: str | None = None, prov: str | None = None):
         # thinking_level : les modèles Gemini 3 « réfléchissent » longuement par défaut ; pour une tâche de
         # transformation contrainte par un schéma, une réflexion courte suffit et divise le temps de réponse.
         extra = {"thinking_config": {"thinking_level": thinking_level()}} if model.startswith("gemini-3") else {}
-        return ChatGoogleGenerativeAI(model=model, temperature=0, seed=42, timeout=llm_timeout(), max_retries=3, **extra)
+        return ChatGoogleGenerativeAI(model=model, temperature=0, seed=42, timeout=llm_timeout(), max_retries=2, **extra)
     if p == "groq":
         from langchain_groq import ChatGroq
 
-        return ChatGroq(model=model, temperature=0, max_retries=2, timeout=llm_timeout(), model_kwargs={"seed": 42})
+        return ChatGroq(model=model, temperature=0, max_retries=1, timeout=llm_timeout(), model_kwargs={"seed": 42})
     if p == "ollama":
         from langchain_ollama import ChatOllama
 
@@ -181,7 +184,7 @@ def explain_error(exc: Exception) -> str:
         return ("Quota gratuit du fournisseur atteint (modèle de secours compris). Attendez un peu, ou choisissez "
                 f"un autre modèle ou fournisseur dans la barre latérale. Détail : {detail}")
     if isinstance(exc, ModelTimeoutError) or any("Timeout" in c.__name__ for c in type(exc).__mro__):
-        return (f"Le modèle {model_name()} n'a pas répondu dans le délai de {llm_timeout():.0f} s (essais compris). "
+        return (f"Le modèle {model_name()} n'a pas répondu dans le délai de {llm_timeout():.0f} s (secours compris). "
                 "Le service est peut-être surchargé : réessayez, choisissez un modèle plus léger, ou augmentez "
                 f"SDD_TIMEOUT dans .env. Détail : {detail}")
     if isinstance(exc, ModelConnectionError) or "Connect" in type(exc).__name__:
@@ -206,9 +209,43 @@ def structured_method() -> str:
     return os.getenv("SDD_STRUCTURED_METHOD", "json_schema")
 
 
+class CallTimeout(TimeoutError):
+    """Le modèle n'a pas rendu la main dans le délai SDD_TIMEOUT (horloge côté Python)."""
+
+
+def invoke_with_deadline(runnable, inp, seconds: float):
+    """Appelle runnable.invoke(inp) avec un délai DUR.
+
+    Le `timeout` des clients HTTP ne suffit pas : il s'applique à chaque essai (et le client en refait
+    plusieurs), et il est remis à zéro tant que le serveur envoie quelques octets. Ici, l'appel tourne dans un
+    fil séparé (avec le contexte LangGraph/LangChain copié) et l'on n'attend jamais plus de `seconds` secondes.
+    Si le délai est dépassé, l'appel est abandonné (le fil se termine seul en arrière-plan) et CallTimeout est
+    levée : l'étape s'arrête avec un message clair, ou bascule sur le modèle de secours."""
+    ctx = contextvars.copy_context()
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["out"] = ctx.run(runnable.invoke, inp)
+        except BaseException as exc:  # transmis au fil principal
+            box["err"] = exc
+
+    # fil « démon » : s'il reste bloqué, il n'empêche ni la suite du workflow ni la fermeture du programme
+    worker = threading.Thread(target=run, name="sdd-llm", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise CallTimeout(f"aucune réponse du modèle en {seconds:.0f} s (délai SDD_TIMEOUT)")
+    if "err" in box:
+        raise box["err"]
+    return box["out"]
+
+
 def generate(llm, schema, system: str, payload: str, validate, max_retries: int, fallback_llm=None):
     """Appel LLM structuré (LCEL : prompt | modèle structuré) + validation déterministe + correction bornée.
 
+    Chaque appel a un délai dur (SDD_TIMEOUT). Si le modèle principal échoue (délai, panne, quota, clé),
+    on bascule sur le modèle de secours, et l'on y reste pour le reste de l'étape.
     Ne lève pas si l'objet reste invalide : renvoie le dernier objet et ses erreurs,
     que le Gardien transformera en alertes.
     """
@@ -218,25 +255,36 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     prompt = ChatPromptTemplate.from_messages(
         [("system", system), ("human", "{input}"), MessagesPlaceholder("corrections", optional=True)]
     )
-    model = llm.with_structured_output(schema, method=structured_method())
-    if fallback_llm is not None:  # mécanisme standard LangChain : bascule si le modèle principal échoue
-        model = model.with_fallbacks([fallback_llm.with_structured_output(schema, method=structured_method())])
-    chain = prompt | model  # LCEL
+    chains = [("principal", prompt | llm.with_structured_output(schema, method=structured_method()))]  # LCEL
+    if fallback_llm is not None:
+        chains.append(("secours", prompt | fallback_llm.with_structured_output(schema, method=structured_method())))
     corrections: list = []
     obj, errors = None, ["Aucune sortie."]
     step = schema.__name__
+    deadline = llm_timeout()
     for attempt in range(1, max_retries + 2):
-        _progress(f"{step} : appel au modèle (essai {attempt}/{max_retries + 1})…")
-        t0 = time.monotonic()
-        try:
-            out = chain.invoke({"input": payload, "corrections": corrections})
-            obj = out if isinstance(out, schema) else schema.model_validate(out)
-            errors = validate(obj)
-        except Exception as exc:
-            if is_api_error(exc):  # clé, modèle introuvable, réseau, délai, quota : inutile de redemander
-                _progress(f"{step} : erreur du fournisseur après {time.monotonic() - t0:.0f} s : {type(exc).__name__}")
-                raise
-            errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
+        answered = False
+        while not answered:
+            label, chain = chains[0]
+            _progress(f"{step} : appel au modèle {label} (essai {attempt}/{max_retries + 1}, "
+                      f"délai max {deadline:.0f} s)…")
+            t0 = time.monotonic()
+            try:
+                out = invoke_with_deadline(chain, {"input": payload, "corrections": corrections}, deadline)
+                answered = True
+                obj = out if isinstance(out, schema) else schema.model_validate(out)
+                errors = validate(obj)
+            except Exception as exc:
+                if is_api_error(exc):  # clé, modèle introuvable, réseau, délai, quota : inutile de redemander
+                    _progress(f"{step} : échec du modèle {label} après {time.monotonic() - t0:.0f} s : "
+                              f"{type(exc).__name__} {str(exc)[:120]}")
+                    if len(chains) > 1:
+                        chains.pop(0)  # bascule sur le secours pour le reste de l'étape
+                        _progress(f"{step} : bascule sur le modèle de secours")
+                        continue
+                    raise
+                errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
+                answered = True  # sortie reçue mais invalide : on passe à la correction
         _progress(f"{step} : réponse en {time.monotonic() - t0:.0f} s, "
                   + ("valide" if not errors else f"{len(errors)} erreur(s) de validation, correction demandée"))
         if not errors:
@@ -253,8 +301,6 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     if obj is None:
         raise RuntimeError("Le modèle n'a produit aucune sortie valide : " + "; ".join(errors))
     return obj, errors
-
-
 
 
 def _progress(message: str) -> None:

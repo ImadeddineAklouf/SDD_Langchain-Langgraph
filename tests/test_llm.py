@@ -94,7 +94,7 @@ def test_generate_stops_immediately_on_api_error():
 def test_gemini_call_has_timeout_and_short_thinking(monkeypatch):
     """Un appel ne peut jamais bloquer indéfiniment (écran figé sur la première étape)."""
     m = llm.get_llm()
-    assert m.timeout == 120 and m.max_retries == 3
+    assert m.timeout == 120 and m.max_retries == 2
     assert m.thinking_config == {"thinking_level": "low"}
     monkeypatch.setenv("SDD_TIMEOUT", "30")
     monkeypatch.setenv("SDD_THINKING", "high")

@@ -50,7 +50,7 @@ def test_runner_reports_nodes_and_guardian_pauses(tmp_path):
     g2 = build_graph(scripted_llm(), tmp_path / "p", checkpointer=MemorySaver())
     advance(g2, {"brief": BRIEF, "constitution": CONSTITUTION}, {"configurable": {"thread_id": "p"}},
             on_progress=progress.append)
-    assert progress[0] == "Spec : appel au modèle (essai 1/4)…"  # progression en direct pendant un nœud
+    assert progress[0] == "Spec : appel au modèle principal (essai 1/4, délai max 120 s)…"  # progression en direct pendant un nœud
     assert any(p.startswith("Spec : réponse en") for p in progress)
     assert ("gate", "décision humaine : continuer") in seen
     assert (tmp_path / "workspace/todo/cli.py").exists()
