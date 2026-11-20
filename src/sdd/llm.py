@@ -179,7 +179,7 @@ def is_api_error(exc: Exception) -> bool:
     n'en fait pas partie : elle est corrigée par la boucle de génération."""
     from langchain_core.exceptions import ModelError
 
-    if isinstance(exc, ModelError):
+    if isinstance(exc, (ModelError, AllModelsFailed)):
         return True
     if _is_network_error(exc):
         return True
@@ -193,26 +193,31 @@ def explain_error(exc: Exception) -> str:
         ModelRateLimitError, ModelTimeoutError,
     )
 
+    if isinstance(exc, AllModelsFailed):
+        return ("Aucun modèle n'a pu répondre :\n\n" + "\n\n".join(
+            f"- **{label}** : {explain_error(e)}" for label, e in exc.failures)
+            + "\n\nSi un seul fournisseur est en cause, choisissez « (aucun) » ou un autre modèle comme modèle de "
+              "secours dans la barre latérale.")
     detail = str(exc)[:400]
     status = getattr(exc, "status_code", None)
     if isinstance(exc, ModelNotFoundError) or status == 404:
-        return (f"Modèle introuvable pour cette clé ({model_name()}). Choisissez un autre modèle dans la barre "
+        return (f"Modèle introuvable pour cette clé. Choisissez un autre modèle dans la barre "
                 f"latérale (ou SDD_MODEL dans .env). Détail : {detail}")
     if isinstance(exc, (ModelAuthenticationError, ModelPermissionDeniedError)) or status in (401, 403):
         key = API_KEYS.get(provider(), "la clé API")
         return f"Clé API refusée : vérifiez {key} dans le fichier .env. Détail : {detail}"
     if isinstance(exc, ModelRateLimitError) or status == 429:
         if rate_limit_wait(exc) is not None:
-            return ("Limite par minute du fournisseur toujours atteinte après plusieurs attentes (modèle de secours "
-                    "compris). Cliquez sur « Reprendre » dans une minute, ou choisissez un autre fournisseur "
-                    f"(Gemini) dans la barre latérale. Détail : {detail}")
+            return ("Limite par minute du fournisseur toujours atteinte après plusieurs attentes. Cliquez sur "
+                    "« Reprendre » dans une minute, ou choisissez un autre fournisseur dans la barre latérale. "
+                    f"Détail : {detail}")
         if _DAILY.search(str(exc)):
-            return ("Quota JOURNALIER gratuit du fournisseur épuisé (modèle de secours compris). Choisissez un autre "
+            return ("Quota JOURNALIER gratuit du fournisseur épuisé. Choisissez un autre "
                     f"fournisseur ou modèle dans la barre latérale, ou réessayez demain. Détail : {detail}")
-        return ("Quota gratuit du fournisseur atteint (modèle de secours compris). Attendez un peu, ou choisissez "
+        return ("Quota gratuit du fournisseur atteint. Attendez un peu, ou choisissez "
                 f"un autre modèle ou fournisseur dans la barre latérale. Détail : {detail}")
     if isinstance(exc, ModelTimeoutError) or any("Timeout" in c.__name__ for c in type(exc).__mro__):
-        return (f"Le modèle {model_name()} n'a pas répondu dans le délai de {llm_timeout():.0f} s (secours compris). "
+        return (f"Le modèle n'a pas répondu dans le délai de {llm_timeout():.0f} s. "
                 "Le service est peut-être surchargé : réessayez, choisissez un modèle plus léger, ou augmentez "
                 f"SDD_TIMEOUT dans .env. Détail : {detail}")
     if isinstance(exc, ModelConnectionError) or "Connect" in type(exc).__name__:
@@ -269,6 +274,20 @@ def rate_limit_wait(exc: Exception) -> float | None:
     return wait + 1.0 if wait <= MAX_RATE_WAIT else None
 
 
+class AllModelsFailed(Exception):
+    """Le modèle principal ET le secours ont échoué : on garde les DEUX erreurs (avant, seule celle du secours
+    s'affichait, ce qui faisait croire que le fournisseur choisi n'était pas utilisé)."""
+
+    def __init__(self, failures: list[tuple[str, Exception]]):
+        self.failures = failures
+        super().__init__(" | ".join(f"{label} : {type(e).__name__} : {str(e)[:300]}" for label, e in failures))
+
+
+def _model_label(llm) -> str:
+    name = getattr(llm, "model", None) or getattr(llm, "model_name", None) or type(llm).__name__
+    return str(name).removeprefix("models/")
+
+
 class CallTimeout(TimeoutError):
     """Le modèle n'a pas rendu la main dans le délai SDD_TIMEOUT (horloge côté Python)."""
 
@@ -315,9 +334,12 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     prompt = ChatPromptTemplate.from_messages(
         [("system", system), ("human", "{input}"), MessagesPlaceholder("corrections", optional=True)]
     )
-    chains = [("principal", prompt | llm.with_structured_output(schema, method=structured_method()))]  # LCEL
+    chains = [(f"principal ({_model_label(llm)})",
+               prompt | llm.with_structured_output(schema, method=structured_method()))]  # LCEL
     if fallback_llm is not None:
-        chains.append(("secours", prompt | fallback_llm.with_structured_output(schema, method=structured_method())))
+        chains.append((f"secours ({_model_label(fallback_llm)})",
+                       prompt | fallback_llm.with_structured_output(schema, method=structured_method())))
+    failures: list[tuple[str, Exception]] = []
     corrections: list = []
     obj, errors = None, ["Aucune sortie."]
     step = schema.__name__
@@ -347,9 +369,12 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
                     _progress(f"{step} : échec du modèle {label} après {time.monotonic() - t0:.0f} s : "
                               f"{type(exc).__name__} {str(exc)[:120]}")
                     if len(chains) > 1:
+                        failures.append((label, exc))
                         chains.pop(0)  # bascule sur le secours pour le reste de l'étape
                         _progress(f"{step} : bascule sur le modèle de secours")
                         continue
+                    if failures:
+                        raise AllModelsFailed(failures + [(label, exc)]) from exc
                     raise
                 errors = [f"Sortie non conforme au schéma : {str(exc)[:500]}"]
                 answered = True  # sortie reçue mais invalide : on passe à la correction
