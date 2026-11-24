@@ -233,7 +233,8 @@ def build_graph(
     ws = out / "workspace"
     checkpoints = set(checkpoints)
     gen = partial(generate, fallback_llm=fallback_llm)  # tous les nœuds partagent le même modèle de secours
-    guardian_graph = build_guardian(guardian_llm, max_retries=1, require_tests=require_tests)
+    guardian_graph = build_guardian(guardian_llm, max_retries=1, require_tests=require_tests,
+                                    fallback_llm=fallback_llm)
 
     # ---------------- 1. constitution (déterministe, sans LLM) ----------------
     def constitution(state: SDDState):

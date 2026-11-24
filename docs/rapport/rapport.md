@@ -1202,6 +1202,13 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   requête et réponse comprises) reste trop petite pour les grosses étapes d'un brief détaillé ; c'est un secours,
   pas un fournisseur principal.
 
+- **Le Gardien a lui aussi un secours.** Après un changement de modèle principal, le contrôle sémantique du Gardien
+  utilisait encore l'ancien modèle (choisi plus tôt, puis invisible quand la liste des modèles ne s'affichait
+  pas) et tombait sur son quota épuisé (`GARDIEN_SEMANTIQUE_INDISPONIBLE`). Désormais, le Gardien reçoit le même
+  modèle de secours que le producteur, les modèles du Gardien et du Correcteur restent visibles (champ texte) même
+  sans liste, et un échec passager du chargement de la liste n'est plus gardé en cache.
+  Test : `test_semantic_guardian_uses_backup_model_when_its_model_is_out_of_quota`.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).

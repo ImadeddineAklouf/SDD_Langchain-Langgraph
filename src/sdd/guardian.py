@@ -279,7 +279,7 @@ def _redo_for_refs(refs: list[str], stage: str) -> str:
     return min(kinds, key=REDO_ORDER.index) if kinds else DEFAULT_REDO[stage]
 
 
-def semantic_alerts(llm, stage: str, a: dict, max_retries: int = 1) -> list[dict]:
+def semantic_alerts(llm, stage: str, a: dict, max_retries: int = 1, fallback_llm=None) -> list[dict]:
     known = _known_ids(a)
     parts = ["SOURCES :\n" + "\n".join(f"[{s['id']}] ({s['origin']}) {s['text']}" for s in a.get("sources", []))]
     parts.append("SPEC :\n" + json.dumps(a["spec"]["requirements"], ensure_ascii=False, separators=(",", ":")))
@@ -295,7 +295,8 @@ def semantic_alerts(llm, stage: str, a: dict, max_retries: int = 1) -> list[dict
                 for i, f in enumerate(r.findings, 1) for x in f.refs if x not in known]
 
     try:
-        review, _errs = generate(llm, SemanticReview, prompts.GUARDIAN, "\n\n".join(parts), validate, max_retries)
+        review, _errs = generate(llm, SemanticReview, prompts.GUARDIAN, "\n\n".join(parts), validate, max_retries,
+                                 fallback_llm=fallback_llm)
     except Exception as exc:  # quota, réseau… : le Gardien le signale au lieu de se taire
         return [make_alert("GARDIEN_SEMANTIQUE_INDISPONIBLE", "warning", stage,
                            f"Le contrôle sémantique n'a pas pu s'exécuter ({type(exc).__name__}: {str(exc)[:200]}). "
@@ -334,7 +335,7 @@ def consolidate_alerts(alerts: list[dict], accepted: list[str]) -> list[dict]:
                                       (x.get("question") or {}).get("id", ""), x["id"]))
 
 
-def build_guardian(llm=None, max_retries: int = 1, require_tests: bool = False):
+def build_guardian(llm=None, max_retries: int = 1, require_tests: bool = False, fallback_llm=None):
     """Graphe du Gardien : deterministic -> (semantic) -> consolidate.
 
     Le contrôle sémantique n'est lancé que si un LLM est fourni, à une étape où il a du sens, et
@@ -345,7 +346,8 @@ def build_guardian(llm=None, max_retries: int = 1, require_tests: bool = False):
         return {"alerts": CHECKS[s["stage"]](s["artifacts"], require_tests)}
 
     def semantic(s: GuardianState):
-        return {"alerts": semantic_alerts(llm, s["stage"], s["artifacts"], max_retries)}
+        # même modèle de secours que le producteur : un quota épuisé ne fait plus sauter le contrôle sémantique
+        return {"alerts": semantic_alerts(llm, s["stage"], s["artifacts"], max_retries, fallback_llm)}
 
     def consolidate(s: GuardianState):
         return {"report": consolidate_alerts(s.get("alerts", []), s.get("accepted", []))}

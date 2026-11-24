@@ -153,3 +153,31 @@ def test_semantic_warning_can_be_acknowledged_in_the_full_graph(tmp_path):
     assert pause["stage"] == "plan" and not pause["blocking"] and pause["alerts"][0]["origin"] == "sémantique"
     res = g.invoke(Command(resume={"action": "continue"}), cfg)  # acquitté : ne repause pas à l'analyse
     assert "__interrupt__" not in res and (tmp_path / "workspace/todo/cli.py").exists()
+
+
+def test_semantic_guardian_uses_backup_model_when_its_model_is_out_of_quota():
+    """Quota du Gardien épuisé : il bascule sur le modèle de secours au lieu de sauter le contrôle sémantique."""
+    from langchain_core.runnables import RunnableLambda
+
+    from sdd.guardian import semantic_alerts
+    from sdd.models import SemanticReview
+
+    class Quota(Exception):
+        status_code = 429
+
+    class M:
+        def __init__(self, name, out):
+            self.model, self.out = name, out
+
+        def with_structured_output(self, schema, **_kw):
+            def run(_i):
+                if isinstance(self.out, Exception):
+                    raise self.out
+                return self.out
+            return RunnableLambda(run)
+
+    a = {"sources": [], "spec": {"requirements": []}}
+    dead = M("gemini-3.8-flash", Quota("429 RESOURCE_EXHAUSTED quota PerDay"))
+    backup = M("gemini-3.5-flash", SemanticReview(findings=[]))
+    alerts = semantic_alerts(dead, "spec", a, 0, fallback_llm=backup)
+    assert not any(x["code"] == "GARDIEN_SEMANTIQUE_INDISPONIBLE" for x in alerts)

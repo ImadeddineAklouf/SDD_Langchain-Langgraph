@@ -184,8 +184,12 @@ def render() -> None:
         if semantic:
             g_opts = ["(même modèle)"] + [m for m in (available or []) if m != model]
             g_cur = os.getenv("SDD_GUARDIAN_MODEL") or "(même modèle)"
-            g_model = st.selectbox("Modèle du Gardien (idéalement différent du producteur)", g_opts,
-                                   index=g_opts.index(g_cur) if g_cur in g_opts else 0)
+            if available:
+                g_model = st.selectbox("Modèle du Gardien (idéalement différent du producteur)", g_opts,
+                                       index=g_opts.index(g_cur) if g_cur in g_opts else 0)
+            else:  # liste indisponible : champ texte, sinon un ancien choix resterait actif sans être visible
+                g_model = st.text_input("Modèle du Gardien (vide = même modèle)",
+                                        value="" if g_cur == "(même modèle)" else g_cur).strip() or "(même modèle)"
             os.environ["SDD_GUARDIAN_MODEL"] = "" if g_model == "(même modèle)" else g_model
         st.divider()
         st.subheader("🩹 Correcteur")
@@ -196,7 +200,12 @@ def render() -> None:
         if corr:
             c_opts = ["(même modèle)"] + [m for m in (available or []) if m != model]
             c_cur = os.getenv("SDD_CORRECTOR_MODEL") or "(même modèle)"
-            c_model = st.selectbox("Modèle du Correcteur", c_opts, index=c_opts.index(c_cur) if c_cur in c_opts else 0)
+            if available:
+                c_model = st.selectbox("Modèle du Correcteur", c_opts,
+                                       index=c_opts.index(c_cur) if c_cur in c_opts else 0)
+            else:
+                c_model = st.text_input("Modèle du Correcteur (vide = même modèle)",
+                                        value="" if c_cur == "(même modèle)" else c_cur).strip() or "(même modèle)"
             os.environ["SDD_CORRECTOR_MODEL"] = "" if c_model == "(même modèle)" else c_model
             os.environ["SDD_CORRECTOR_ROUNDS"] = str(st.number_input("Tours du Correcteur avant de vous solliciter",
                                                                       1, 5, int(os.getenv("SDD_CORRECTOR_ROUNDS", "2"))))
