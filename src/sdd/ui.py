@@ -103,6 +103,23 @@ def render() -> None:
     ss.setdefault("finished", False)
     ss.setdefault("error", None)
 
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _models_or_raise(_key):
+        from sdd.llm import gemini_models
+
+        models = gemini_models()
+        if models is None:  # une exception n'est pas mise en cache : on réessaiera au prochain affichage
+            raise RuntimeError("liste des modèles Gemini indisponible")
+        return models
+
+    def _cached_gemini_models(key):
+        """Liste mise en cache 10 min si elle a été obtenue ; un échec passager n'est PAS gardé en mémoire
+        (avant, il masquait la liste déroulante pendant 10 minutes)."""
+        try:
+            return _models_or_raise(key)
+        except RuntimeError:
+            return None
+
     # ------------------------------ barre latérale ------------------------------
     with st.sidebar:
         st.header("Configuration")
@@ -116,8 +133,7 @@ def render() -> None:
             os.environ.pop("SDD_FALLBACK_PROVIDER", None)
         os.environ["SDD_PROVIDER"] = prov
         wanted = os.getenv("SDD_MODEL") or DEFAULTS[prov]
-        available = st.cache_data(ttl=600, show_spinner=False)(lambda _key: gemini_models())(
-            os.getenv("GOOGLE_API_KEY")) if prov == "gemini" else None
+        available = _cached_gemini_models(os.getenv("GOOGLE_API_KEY")) if prov == "gemini" else None
         if available:  # liste réelle des modèles ouverts pour cette clé
             if wanted not in available:
                 st.warning(f"`{wanted}` n'est pas disponible pour votre clé : choisissez un modèle ci-dessous.")
