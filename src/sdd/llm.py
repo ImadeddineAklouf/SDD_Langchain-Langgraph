@@ -1,4 +1,5 @@
-"""Fabrique de modèle. Température 0 partout, fournisseur choisi par variable d'env.
+"""Fabrique de modèle. Température 0 (sauf Gemini 3 : 1.0, voir gemini_temperature), fournisseur choisi par
+variable d'env.
 
 SDD_PROVIDER = gemini (défaut, API Google gratuite) | groq | ollama (local, optionnel)
 SDD_MODEL    = nom du modèle (défaut selon le fournisseur)
@@ -10,6 +11,11 @@ SDD_CORRECTOR = 1 (défaut) | 0 : Correcteur (3e agent) qui corrige par patchs c
 SDD_CORRECTOR_MODEL = modèle du Correcteur (défaut : modèle principal) ; SDD_CORRECTOR_ROUNDS = tours (2)
 SDD_TIMEOUT  = délai maximal d'un appel au modèle, essais du client compris, en secondes (défaut 120) :
                garanti par une horloge côté Python, jamais d'attente infinie
+SDD_GEMINI_TEMPERATURE = température des modèles Gemini 3 (défaut 1.0, valeur recommandée par Google :
+               en dessous, le modèle peut tourner en boucle et ne jamais finir sa réponse)
+SDD_MAX_OUTPUT_TOKENS = plafond de la réponse Gemini (défaut 16384) : une réponse qui boucle s'arrête au lieu
+               de consommer tout le délai
+SDD_GROQ_TPM = limite de tokens par minute du compte Groq (défaut 8000, offre gratuite)
 SDD_THINKING = niveau de réflexion des modèles Gemini 3 : minimal | low (défaut) | medium | high
 SDD_NUM_CTX  = taille du contexte Ollama en tokens (défaut 16384)
 SDD_STRUCTURED_METHOD = json_schema (défaut) | function_calling | json_mode
@@ -120,6 +126,24 @@ def llm_timeout() -> float:
     return float(os.getenv("SDD_TIMEOUT", "120"))
 
 
+def gemini_temperature(model: str) -> float:
+    """Gemini 3 : Google recommande « fortement » la température par défaut 1.0 ; en dessous, le modèle peut
+    boucler (réponse sans fin, donc délai dépassé). Le déterminisme du pipeline ne repose pas sur la température
+    mais sur les schémas et les validateurs : une sortie qui invente reste refusée."""
+    if model.startswith("gemini-3"):
+        return float(os.getenv("SDD_GEMINI_TEMPERATURE", "1.0"))
+    return 0.0
+
+
+def groq_tpm() -> int:
+    return int(os.getenv("SDD_GROQ_TPM", "8000"))
+
+
+def estimate_tokens(*texts: str) -> int:
+    """Estimation prudente (≈ 3 caractères par token, le français et le JSON coûtent plus que l'anglais)."""
+    return sum(len(t) for t in texts) // 3 + 1
+
+
 def thinking_level() -> str:
     return os.getenv("SDD_THINKING", "low").strip().lower()
 
@@ -135,11 +159,17 @@ def get_llm(model: str | None = None, prov: str | None = None):
         # thinking_level : les modèles Gemini 3 « réfléchissent » longuement par défaut ; pour une tâche de
         # transformation contrainte par un schéma, une réflexion courte suffit et divise le temps de réponse.
         extra = {"thinking_config": {"thinking_level": thinking_level()}} if model.startswith("gemini-3") else {}
-        return ChatGoogleGenerativeAI(model=model, temperature=0, seed=42, timeout=llm_timeout(), max_retries=2, **extra)
+        return ChatGoogleGenerativeAI(model=model, temperature=gemini_temperature(model), seed=42, timeout=llm_timeout(),
+                                      max_retries=2, max_output_tokens=int(os.getenv("SDD_MAX_OUTPUT_TOKENS", "16384")),
+                                      **extra)
     if p == "groq":
         from langchain_groq import ChatGroq
 
-        return ChatGroq(model=model, temperature=0, max_retries=1, timeout=llm_timeout(), model_kwargs={"seed": 42})
+        # gpt-oss « raisonne » avant de répondre ; ce raisonnement compte dans la limite par minute (8 000 tokens
+        # en gratuit) : un raisonnement court suffit pour une transformation contrainte par un schéma.
+        extra = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
+        return ChatGroq(model=model, temperature=0, max_retries=1, timeout=llm_timeout(), model_kwargs={"seed": 42},
+                        **extra)
     if p == "ollama":
         from langchain_ollama import ChatOllama
 
@@ -379,7 +409,16 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     prompt = ChatPromptTemplate.from_messages(
         [("system", system), ("human", "{input}"), MessagesPlaceholder("corrections", optional=True)]
     )
+    import json as _json
+
+    request_tokens = estimate_tokens(system, payload, _json.dumps(schema.model_json_schema()))
+
     def chain_of(role: str, model) -> tuple[str, object, str | None]:
+        if _provider_of(model) == "groq" and hasattr(model, "model_copy"):
+            # Groq compte la réponse attendue dans sa limite par minute : on borne la réponse à ce qui reste
+            # (sinon « Request too large », même pour une requête de quelques milliers de tokens).
+            budget = max(1024, groq_tpm() - request_tokens - 200)
+            model = model.model_copy(update={"max_tokens": budget})
         return (f"{role} ({_model_label(model)})",
                 prompt | model.with_structured_output(schema, method=structured_method()),  # LCEL
                 _provider_of(model))
@@ -388,6 +427,7 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     if fallback_llm is not None:
         chains.append(chain_of("secours", fallback_llm))
     failures: list[tuple[str, Exception]] = []
+    failed_providers: set[str | None] = set()  # jamais de « secours » vers un fournisseur déjà en échec
     corrections: list = []
     obj, errors = None, ["Aucune sortie."]
     step = schema.__name__
@@ -417,10 +457,11 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
                     _progress(f"{step} : échec du modèle {label} après {time.monotonic() - t0:.0f} s : "
                               f"{type(exc).__name__} {str(exc)[:120]}")
                     failed = chains.pop(0)
+                    failed_providers.add(prov)
                     if is_request_too_large(exc) and prov:
                         # même fournisseur = même limite de taille : inutile d'essayer son autre modèle
                         chains = [c for c in chains if c[2] != prov]
-                        if not chains and (rescue := rescue_llm(prov)) is not None:
+                        if not chains and "gemini" not in failed_providers and (rescue := rescue_llm(prov)) is not None:
                             chains.append(chain_of("secours", rescue))
                     if chains:
                         failures.append((label, exc))

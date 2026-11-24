@@ -164,7 +164,11 @@ Changer de fournisseur revient à changer de classe (`ChatGroq`, `ChatOllama`) :
 ne bouge pas. C'est tout l'intérêt de l'abstraction, et c'est ce que fait `src/sdd/llm.py`.
 
 **`temperature=0`** demande au modèle de choisir systématiquement le mot le plus probable : c'est le réglage le
-moins créatif et le plus reproductible.
+moins créatif et le plus reproductible. Exception : pour les modèles **Gemini 3**, Google recommande « fortement »
+de garder la valeur par défaut 1.0, car en dessous le modèle peut **tourner en boucle** et ne jamais finir sa
+réponse. Le projet suit donc cette recommandation pour Gemini 3 (`SDD_GEMINI_TEMPERATURE`, défaut 1.0) et garde 0
+ailleurs. Ce n'est pas un recul du déterminisme : il repose sur les schémas et les validateurs, qui refusent toute
+sortie qui invente, quelle que soit la température (chapitre 10).
 
 ## 3.2 Les messages
 
@@ -895,7 +899,7 @@ le nom. C'est un **avertissement** (et non un blocage), à valider.
 |---|---|---|
 | Découpage des entrées sans LLM | `ingest.py` | sources non identifiables |
 | Schémas Pydantic `extra="forbid"` + sortie `json_schema` | `models.py`, `llm.py` | champs inventés, texte libre |
-| Température 0 | `llm.py` | variabilité inutile |
+| Température 0 (1.0 pour Gemini 3, recommandation Google) | `llm.py` | variabilité inutile, boucles |
 | Citation mot pour mot, ancrage lexical | `validate_spec` | exigences sans origine, ajouts de vocabulaire |
 | Couverture du brief et des réponses humaines | `validate_spec` | oublis silencieux, réponses perdues |
 | Questions au lieu de suppositions ; questions persistantes | prompts, `clarify` | informations supposées |
@@ -1173,6 +1177,17 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   envoyés en texte brut plutôt qu'en JSON échappé. Tests : `test_413_is_not_retried_as_a_schema_error_and_skips_same_provider_backup`,
   `test_413_on_groq_switches_to_gemini_when_its_key_is_present`.
 
+- **Gemini qui ne finit jamais, Groq qui refuse.** Juste après les réponses aux questions de clarification, la
+  nouvelle Specify a échoué trois fois : Gemini a dépassé 120 s (alors que la première Specify, presque identique,
+  avait pris 33 s), Groq a refusé une requête de 8 476 tokens, puis le secours Gemini a de nouveau attendu 120 s.
+  Trois corrections : (1) les modèles Gemini 3 tournent à la température 1.0 recommandée par Google (à 0, ils
+  peuvent boucler sans fin), et `max_output_tokens` (16 384) borne une réponse qui boucle ; (2) Groq compte la
+  réponse **attendue** dans sa limite par minute : `generate()` fixe `max_tokens` à ce qui reste de la limite
+  (`SDD_GROQ_TPM`, 8 000) une fois la requête estimée, et les modèles `gpt-oss` raisonnent en mode `low` ;
+  (3) aucun secours n'est relancé vers un fournisseur qui a déjà échoué dans la même étape. Tests :
+  `test_groq_answer_is_bounded_by_what_remains_of_the_per_minute_limit`,
+  `test_no_rescue_to_gemini_when_gemini_already_timed_out`.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).
@@ -1241,7 +1256,7 @@ formats, identifiants et bibliothèques), `FIX`, et **`GUARDIAN`** (auditeur ind
 
 ## 14.5 `llm.py`
 
-`get_llm()` instancie le chat model du fournisseur choisi, toujours à `temperature=0`. `get_fallback_llm()` donne
+`get_llm()` instancie le chat model du fournisseur choisi, à `temperature=0` (1.0 pour Gemini 3). `get_fallback_llm()` donne
 le modèle de secours, `get_guardian_llm()` le modèle du Gardien (ou `None` si le contrôle sémantique est
 désactivé). `is_api_error()` et `explain_error()` distinguent et expliquent les erreurs du fournisseur.
 `generate()`, déplacée ici depuis `graph.py` pour être partagée par le producteur et le Gardien, implémente la

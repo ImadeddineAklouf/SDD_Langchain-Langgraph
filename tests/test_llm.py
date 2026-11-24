@@ -18,7 +18,9 @@ def test_gemini_is_default_provider(monkeypatch):
 
     m = llm.get_llm()
     assert isinstance(m, ChatGoogleGenerativeAI)
-    assert (m.model, m.temperature, m.seed) == ("gemini-3.8-flash", 0, 42)
+    # Gemini 3 : température 1.0 recommandée par Google (en dessous : boucles, délai dépassé)
+    assert (m.model, m.temperature, m.seed) == ("gemini-3.8-flash", 1.0, 42)
+    assert m.max_output_tokens == 16384
     assert llm.fallback_label() == "groq/openai/gpt-oss-120b"  # clé Groq présente : secours chez Groq
     monkeypatch.setenv("SDD_FALLBACK_MODEL", "gemini-3.8-flash-lite")
     assert llm.get_fallback_llm().model == "gemini-3.8-flash-lite"
@@ -289,3 +291,54 @@ def test_413_on_groq_switches_to_gemini_when_its_key_is_present(monkeypatch):
     monkeypatch.setenv("SDD_FALLBACK_MODEL", "")
     assert llm.rescue_llm("groq") is None
     assert llm.rescue_llm("gemini") is None
+
+
+def test_groq_reasoning_is_short_and_older_gemini_keeps_temperature_zero(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    g = llm.get_llm("openai/gpt-oss-120b", "groq")
+    assert g.reasoning_effort == "low" and g.temperature < 0.01
+    assert llm.gemini_temperature("gemini-2.5-flash") == 0.0
+    monkeypatch.setenv("SDD_GEMINI_TEMPERATURE", "0.5")
+    assert llm.gemini_temperature("gemini-3.8-flash") == 0.5
+
+
+def test_groq_answer_is_bounded_by_what_remains_of_the_per_minute_limit(monkeypatch):
+    """Groq compte la réponse attendue dans sa limite de 8 000 tokens/minute : on borne max_tokens."""
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        ok: bool
+
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    seen = {}
+    real = llm.get_llm("openai/gpt-oss-120b", "groq")
+
+    def fake_structured(self, schema, **_kw):
+        from langchain_core.runnables import RunnableLambda
+        seen["max_tokens"] = self.max_tokens
+        return RunnableLambda(lambda _i: Out(ok=True))
+
+    monkeypatch.setattr(type(real), "with_structured_output", fake_structured)
+    payload = "x" * 9000  # ≈ 3 000 tokens
+    obj, errs = llm.generate(real, Out, "s", payload, lambda o: [], 0)
+    assert obj.ok and errs == []
+    assert 1024 <= seen["max_tokens"] <= 8000 - 3000 and real.max_tokens is None  # copie, l'original intact
+
+
+def test_no_rescue_to_gemini_when_gemini_already_timed_out(monkeypatch):
+    """Cas réel : Gemini dépasse le délai, Groq refuse (413) ; on ne relance pas Gemini 120 s de plus."""
+    import pytest
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        ok: bool
+
+    gemini = _fake_model("ChatGoogleGenerativeAI", "gemini-3.8-flash", [llm.CallTimeout("aucune réponse en 120 s")])
+    groq = _fake_model("ChatGroq", "openai/gpt-oss-120b", [_StatusError(GROQ_413, 413)])
+    monkeypatch.setenv("GOOGLE_API_KEY", "x")
+    monkeypatch.delenv("SDD_FALLBACK_MODEL", raising=False)
+    monkeypatch.setattr(llm, "get_llm", lambda *a, **k: pytest.fail("secours Gemini relancé"))
+    with pytest.raises(llm.AllModelsFailed) as err:
+        llm.generate(gemini, Out, "s", "x", lambda o: [], 2, fallback_llm=groq)
+    assert gemini.calls == ["gemini-3.8-flash"] and groq.calls == ["openai/gpt-oss-120b"]
+    assert len(err.value.failures) == 2
