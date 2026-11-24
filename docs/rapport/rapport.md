@@ -1188,6 +1188,16 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   `test_groq_answer_is_bounded_by_what_remains_of_the_per_minute_limit`,
   `test_no_rescue_to_gemini_when_gemini_already_timed_out`.
 
+- **Mesurer plutôt que deviner.** Un diagnostic lancé sur le Mac de l'utilisateur, sur les sources réelles d'une
+  session, a tranché deux questions. (1) Gemini répondait `429 RESOURCE_EXHAUSTED` en 2 s, même à un simple
+  « Réponds OK » : le quota gratuit du jour était épuisé, après une journée de tests. (2) Groq compte bien
+  « requête + `max_tokens` » : la même Specify, refusée à 9 450 tokens, passe en 3 à 8 s avec `max_tokens`
+  à 1 024 ou 2 048. La requête réelle pesait ≈ 5 650 tokens, plus que notre estimation (schéma et format du
+  modèle compris). Deux ajustements : l'estimation passe à 2,5 caractères par token, et sur un 413, Groq donnant
+  le dépassement exact (« Limit 8000, Requested 9450 »), `generate()` réduit `max_tokens` d'autant et réessaie
+  une fois (`test_groq_413_recalibrates_answer_budget_once_and_succeeds`). Le message de quota journalier précise
+  que Gemini le remet à zéro à minuit heure du Pacifique (9 h à Paris), modèle par modèle.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).

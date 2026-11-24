@@ -342,3 +342,30 @@ def test_no_rescue_to_gemini_when_gemini_already_timed_out(monkeypatch):
         llm.generate(gemini, Out, "s", "x", lambda o: [], 2, fallback_llm=groq)
     assert gemini.calls == ["gemini-3.8-flash"] and groq.calls == ["openai/gpt-oss-120b"]
     assert len(err.value.failures) == 2
+
+
+def test_groq_413_recalibrates_answer_budget_once_and_succeeds(monkeypatch):
+    """Groq annonce le dépassement exact (« Limit 8000, Requested N ») : on réduit max_tokens d'autant, une fois."""
+    from langchain_core.runnables import RunnableLambda
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        ok: bool
+
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    real = llm.get_llm("openai/gpt-oss-120b", "groq")
+    true_input = 5650  # taille réelle comptée par Groq, plus grosse que notre estimation
+    tried = []
+
+    def fake_structured(self, schema, **_kw):
+        def run(_i):
+            tried.append(self.max_tokens)
+            requested = true_input + self.max_tokens
+            if requested > 8000:
+                raise _StatusError(GROQ_413.replace("Requested 8604", f"Requested {requested}"), 413)
+            return Out(ok=True)
+        return RunnableLambda(run)
+
+    monkeypatch.setattr(type(real), "with_structured_output", fake_structured)
+    obj, errs = llm.generate(real, Out, "s", "x" * 9000, lambda o: [], 0)
+    assert obj.ok and len(tried) == 2 and true_input + tried[1] <= 8000

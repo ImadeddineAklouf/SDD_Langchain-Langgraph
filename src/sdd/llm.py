@@ -140,8 +140,15 @@ def groq_tpm() -> int:
 
 
 def estimate_tokens(*texts: str) -> int:
-    """Estimation prudente (≈ 3 caractères par token, le français et le JSON coûtent plus que l'anglais)."""
-    return sum(len(t) for t in texts) // 3 + 1
+    """Estimation prudente : ≈ 2,5 caractères par token. Mesuré sur Groq (gpt-oss) : une Specify de 12 000
+    caractères (prompt + sources + schéma) compte ≈ 5 650 tokens, le schéma et le format du modèle compris."""
+    return int(sum(len(t) for t in texts) / 2.5) + 1
+
+
+def groq_overshoot(exc: Exception) -> int | None:
+    """Dépassement exact (tokens demandés - limite) annoncé par un 413 Groq, ou None."""
+    m = _LIMIT_REQUESTED.search(str(exc))
+    return int(m.group(2)) - int(m.group(1)) if m and is_request_too_large(exc) else None
 
 
 def thinking_level() -> str:
@@ -287,8 +294,11 @@ def explain_error(exc: Exception) -> str:
                     "« Reprendre » dans une minute, ou choisissez un autre fournisseur dans la barre latérale. "
                     f"Détail : {detail}")
         if _DAILY.search(str(exc)):
+            reset = (" Chez Gemini, il est remis à zéro à minuit heure du Pacifique (9 h à Paris), et chaque "
+                     "modèle a son propre quota." if "RESOURCE_EXHAUSTED" in str(exc) or "gemini" in str(exc).lower()
+                     else "")
             return ("Quota JOURNALIER gratuit du fournisseur épuisé. Choisissez un autre "
-                    f"fournisseur ou modèle dans la barre latérale, ou réessayez demain. Détail : {detail}")
+                    f"fournisseur ou modèle dans la barre latérale, ou réessayez demain.{reset} Détail : {detail}")
         return ("Quota gratuit du fournisseur atteint. Attendez un peu, ou choisissez "
                 f"un autre modèle ou fournisseur dans la barre latérale. Détail : {detail}")
     if isinstance(exc, ModelTimeoutError) or any("Timeout" in c.__name__ for c in type(exc).__mro__):
@@ -413,15 +423,16 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
 
     request_tokens = estimate_tokens(system, payload, _json.dumps(schema.model_json_schema()))
 
-    def chain_of(role: str, model) -> tuple[str, object, str | None]:
+    def chain_of(role: str, model, budget: int | None = None) -> tuple:
         if _provider_of(model) == "groq" and hasattr(model, "model_copy"):
-            # Groq compte la réponse attendue dans sa limite par minute : on borne la réponse à ce qui reste
-            # (sinon « Request too large », même pour une requête de quelques milliers de tokens).
-            budget = max(1024, groq_tpm() - request_tokens - 200)
+            # Groq compte la réponse ATTENDUE (max_tokens) dans sa limite par minute : demandé = requête +
+            # max_tokens. On borne donc la réponse à ce qui reste (mesuré : sans borne, 413 à 9 450 tokens ;
+            # avec max_tokens=2048, la même Specify passe en 8 s).
+            budget = budget or max(1024, groq_tpm() - request_tokens - 200)
             model = model.model_copy(update={"max_tokens": budget})
         return (f"{role} ({_model_label(model)})",
                 prompt | model.with_structured_output(schema, method=structured_method()),  # LCEL
-                _provider_of(model))
+                _provider_of(model), model, budget)
 
     chains = [chain_of("principal", llm)]
     if fallback_llm is not None:
@@ -433,10 +444,11 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     step = schema.__name__
     deadline = llm_timeout()
     waits = 0
+    recalibrated = False
     for attempt in range(1, max_retries + 2):
         answered = False
         while not answered:
-            label, chain, prov = chains[0]
+            label, chain, prov, model_used, budget = chains[0]
             _progress(f"{step} : appel au modèle {label} (essai {attempt}/{max_retries + 1}, "
                       f"délai max {deadline:.0f} s)…")
             t0 = time.monotonic()
@@ -452,6 +464,15 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
                     _progress(f"{step} : limite par minute du modèle {label} atteinte, nouvel essai dans "
                               f"{wait:.0f} s ({waits}/6)…")
                     time.sleep(wait)
+                    continue
+                over = groq_overshoot(exc) if prov == "groq" and budget else None
+                if over is not None and budget - over - 50 >= 1024 and not recalibrated:
+                    # Groq a donné le dépassement exact : on réduit la réponse d'autant et on réessaie, une fois
+                    recalibrated = True
+                    new_budget = budget - over - 50
+                    _progress(f"{step} : requête trop grosse pour Groq de {over} tokens, réponse limitée à "
+                              f"{new_budget} tokens, nouvel essai…")
+                    chains[0] = chain_of(label.split(" (")[0], model_used, new_budget)
                     continue
                 if is_api_error(exc):  # clé, modèle introuvable, réseau, délai, quota : inutile de redemander
                     _progress(f"{step} : échec du modèle {label} après {time.monotonic() - t0:.0f} s : "
