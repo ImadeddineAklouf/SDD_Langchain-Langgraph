@@ -1197,6 +1197,10 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   le dépassement exact (« Limit 8000, Requested 9450 »), `generate()` réduit `max_tokens` d'autant et réessaie
   une fois (`test_groq_413_recalibrates_answer_budget_once_and_succeeds`). Le message de quota journalier précise
   que Gemini le remet à zéro à minuit heure du Pacifique (9 h à Paris), modèle par modèle.
+  Enfin, les réponses humaines n'étaient envoyées deux fois (dans SOURCES et dans le bloc « DÉJÀ RÉPONDU ») :
+  ce bloc ne liste plus que leurs identifiants. Limite assumée : l'offre gratuite de Groq (8 000 tokens par minute,
+  requête et réponse comprises) reste trop petite pour les grosses étapes d'un brief détaillé ; c'est un secours,
+  pas un fournisseur principal.
 
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés

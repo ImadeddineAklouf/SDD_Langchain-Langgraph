@@ -136,9 +136,11 @@ def _answered_block(state: SDDState) -> str:
     done = [s for s in state["sources"] if s["origin"] == "answer"]
     if not done:
         return ""
-    return ("\n\nDÉJÀ RÉPONDU (questions posées à l'humain et ses réponses ; ne repose AUCUNE de ces questions, "
-            "même reformulée, ni une question dont la réponse s'en déduit) :\n"
-            + "\n".join(f"[{s['id']}] {s['text']}" for s in done))
+    # Les textes (question + réponse) sont déjà dans SOURCES : on ne les répète pas, seuls les ids sont listés
+    # (moins de tokens, ce qui compte face aux limites par minute des offres gratuites).
+    return ("\n\nDÉJÀ RÉPONDU (questions posées à l'humain, avec ses réponses, dans les SOURCES d'origine answer ; "
+            "ne repose AUCUNE de ces questions, même reformulée, ni une question dont la réponse s'en déduit) : "
+            + ", ".join(s["id"] for s in done))
 
 
 def _checklist(state: SDDState) -> str:

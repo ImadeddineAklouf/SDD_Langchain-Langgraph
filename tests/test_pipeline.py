@@ -523,3 +523,12 @@ def test_payloads_are_compact_and_files_stay_verbatim():
     out = _fmt_files({"src/a.py": code})
     assert out == f"===== src/a.py =====\n{code}" and "\\n" not in out
     assert _fmt_files({}) == "(aucun)"
+
+
+def test_answers_are_not_sent_twice():
+    """Les réponses humaines sont dans SOURCES : le bloc DÉJÀ RÉPONDU ne liste que leurs ids."""
+    from sdd.graph import _answered_block
+
+    st = {"sources": [{"id": "A-001", "text": "Quelle durée ? Réponse : 4 heures.", "origin": "answer"}]}
+    block = _answered_block(st)
+    assert "A-001" in block and "4 heures" not in block
