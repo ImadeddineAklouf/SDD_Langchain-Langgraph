@@ -2,7 +2,7 @@
 title: "SDD Pipeline déterministe et son Gardien"
 subtitle: "Une « AI factory » Spec-Driven Development avec LangChain et LangGraph : un côté produit, un côté vérifie, l'humain tranche"
 author: "Rapport de projet, de A à Z"
-date: "Novembre 2026"
+date: "24 novembre 2026"
 lang: fr
 ---
 
@@ -1463,6 +1463,44 @@ perdues, le contrôle des fichiers de données et des dépendances, une décisio
 (chapitres 8 et 9). Leçon : une garantie qui dépend d'un clic attentif n'est pas une garantie ; elle doit être
 **vérifiée par un acteur indépendant** et **bloquer** tant qu'elle n'est pas satisfaite.
 
+## 16.3 Exécution complète avec le Gardien (24 novembre 2026)
+
+Première exécution réelle de bout en bout de l'« AI factory » (producteur, Gardien, Correcteur), dans
+l'interface web, sur le brief piégé « Réservation de salles » (chapitre 17.7) et la constitution d'exemple.
+Session `9f37e7f3`, modèle `gemini-3.5-flash` (le quota du jour de `gemini-3.8-flash` était épuisé, voir 13.7),
+modèle du Gardien `gemini-3.6-flash`, secours Groq.
+
+| Heure (UTC) | Étape | Gardien |
+|---|---|---|
+| 12:01 | Spécification | 4 questions bloquantes (durée « trop longue », partage de salle, notification, stockage) |
+| 12:02 | réponses humaines `A-001` à `A-004` | — |
+| 12:05 | Spécification refaite | 0 alerte |
+| 12:06 | Plan | 0 alerte |
+| 12:08 | Analyse (tâches) | 0 alerte, 9/9 exigences couvertes |
+| 12:08 à 12:09 | Implémentation T-001 à T-005 | 0 alerte bloquante |
+| 12:09 | Vérification | ✅ 26 tests pytest réussis |
+
+**Ce qui fonctionne.** Le Gardien a bloqué les quatre pièges du brief au lieu de laisser le modèle trancher. Les
+9 exigences citent toutes leurs sources (`B-xxx`, `A-xxx`). Le code reprend exactement les réponses : 4 heures
+maximum, chevauchement refusé, trois salles fixes, annulation par l'auteur seul, notification console à la
+création seulement, `reservations.json` avec `next_id`, et les messages d'erreur mot pour mot. La contradiction du
+brief (une seule personne par créneau / deux équipes sur le même créneau) a été tranchée par l'humain, pas par l'IA.
+
+**Les deux écarts trouvés en relisant le code.**
+
+1. **Une invention** : `validation.py` renvoie « Erreur : employé invalide », un message qui ne figure dans aucune
+   source. Les messages d'erreur du code ne sont pas encore contrôlés (chapitre 18).
+2. **Un détail perdu** : la réponse humaine fixait le format de date AAAA-MM-JJ, mais aucune exigence ne l'a
+   repris ; le code, fidèle à la spec, ne vérifie donc pas la date. Le Gardien vérifie que chaque exigence cite une
+   source, pas encore que chaque précision d'une réponse (format, message) passe dans la spec.
+
+Le code ne propose pas de commande en ligne : ce n'est pas un écart, rien ne la demandait.
+
+**Ce que l'exécution a coûté.** Une journée de tests a épuisé le quota gratuit de `gemini-3.8-flash` ; le secours
+Groq gratuit (8 000 tokens par minute) ne suffit pas pour une spécification détaillée. Les corrections de ce jour
+sont décrites en 13.7 : erreurs 413 et quota reconnues, bascule sans relancer un modèle déjà en échec, secours
+pour le Gardien, diagnostics mesurés sur la machine de l'utilisateur.
+
 # 17. Installation, utilisation et commandes Git
 
 ## 17.1 Récupérer la nouvelle version sur votre Mac
@@ -1615,15 +1653,20 @@ ni canal de notification inventés.
 - Le contrôle des fichiers de données repose sur les extensions connues (`FORMAT_WORDS`) et sur les chaînes
   littérales : un nom construit dynamiquement (`f"{nom}.json"`) n'est pas vu.
 - Les commentaires, messages d'erreur et noms internes du code ne sont pas contrôlés. Pour les maîtriser, il faut
-  les demander dans le brief ou les réponses.
+  les demander dans le brief ou les réponses. Constaté le 24 novembre 2026 : un message d'erreur inventé est passé
+  (16.3).
+- Une précision d'une réponse humaine (un format, un message) peut se perdre entre la réponse et la spec : seule
+  la citation de la réponse par une exigence est vérifiée (16.3).
 - Le Gardien contrôle la cohérence avec les sources, pas la qualité du code (performance, sécurité).
 - Le code généré est exécuté (pytest) sur la machine : à faire tourner dans un environnement isolé pour un usage
   sérieux.
 - Les API gratuites ont des quotas : le contrôle sémantique ajoute jusqu'à trois appels par exécution.
-- Température 0 ne garantit pas une sortie identique : ce sont les règles d'acceptation qui sont déterministes.
+- Ni la température 0 ni la température 1.0 de Gemini 3 ne garantissent une sortie identique : ce sont les règles d'acceptation qui sont déterministes.
 
 **Évolutions possibles**
 
+- Deux contrôles déterministes du Gardien : refuser tout message « Erreur : … » du code absent des sources, et
+  vérifier que chaque format ou message cité dans une réponse humaine se retrouve dans la spec.
 - Des règles du Gardien configurables par projet (vocabulaire métier, règles de nommage, gravités).
 - Exécuter `verify` après chaque tâche et non seulement à la fin.
 - Notifier l'humain (courriel, messagerie) quand le workflow est en pause, pour un fonctionnement réellement « usine ».
