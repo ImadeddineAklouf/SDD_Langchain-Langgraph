@@ -1160,6 +1160,19 @@ par un schéma), et une boucle de correction qui pouvait enchaîner quatre appel
   `generate()` lève désormais `AllModelsFailed`, qui garde les deux erreurs, et l'interface les explique une par
   une, avec le nom de chaque modèle.
 
+- **Requête trop grosse (413) ≠ sortie hors schéma.** Un run sur Groq s'est arrêté sur « Error code: 413 :
+  Request too large … tokens per minute (TPM): Limit 8000, Requested 8604 ». Le tier gratuit de Groq refuse toute
+  requête plus grosse que sa limite **par minute** : attendre ne sert à rien. Or ce 413 n'était pas reconnu comme
+  une erreur du fournisseur : `generate()` le prenait pour une « sortie non conforme au schéma » et redemandait une
+  correction, ce qui **allongeait** encore la requête, jusqu'à « aucune sortie valide ». Désormais,
+  `is_request_too_large()` reconnaît le 413 (et un 429 dont la taille demandée dépasse la limite) : arrêt immédiat,
+  aucun nouvel essai. Le secours chez le **même** fournisseur est sauté (même limite), et, si `GOOGLE_API_KEY` est
+  renseignée, l'étape bascule toute seule sur Gemini (`rescue_llm`, désactivée si le secours choisi est
+  « (aucun) »). Sinon, le message explique en français la taille, la limite et quoi faire, puis « Reprendre ».
+  En parallèle, les requêtes sont allégées sans perte : JSON compact (sans indentation) et fichiers du projet
+  envoyés en texte brut plutôt qu'en JSON échappé. Tests : `test_413_is_not_retried_as_a_schema_error_and_skips_same_provider_backup`,
+  `test_413_on_groq_switches_to_gemini_when_its_key_is_present`.
+
 Une leçon pratique de cet épisode : le correctif avait été poussé sur une branche, mais pas encore fusionné dans
 `main`. Le Mac exécutait donc toujours l'ancienne version, sans délai. Depuis, les correctifs sont intégrés
 directement à `main`, et la première commande à lancer est toujours `git pull origin main` (chapitre 17).

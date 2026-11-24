@@ -282,13 +282,13 @@ def _redo_for_refs(refs: list[str], stage: str) -> str:
 def semantic_alerts(llm, stage: str, a: dict, max_retries: int = 1) -> list[dict]:
     known = _known_ids(a)
     parts = ["SOURCES :\n" + "\n".join(f"[{s['id']}] ({s['origin']}) {s['text']}" for s in a.get("sources", []))]
-    parts.append("SPEC :\n" + json.dumps(a["spec"]["requirements"], ensure_ascii=False, indent=1))
+    parts.append("SPEC :\n" + json.dumps(a["spec"]["requirements"], ensure_ascii=False, separators=(",", ":")))
     if stage in ("plan", "analyze"):
-        parts.append("PLAN :\n" + json.dumps(a["plan"]["items"], ensure_ascii=False, indent=1))
+        parts.append("PLAN :\n" + json.dumps(a["plan"]["items"], ensure_ascii=False, separators=(",", ":")))
     if stage == "analyze":
         parts.append("TÂCHES :\n" + json.dumps(
             [{k: t[k] for k in ("id", "title", "description", "requirement_ids", "plan_item_ids", "files")}
-             for t in a["tasks"]["tasks"]], ensure_ascii=False, indent=1))
+             for t in a["tasks"]["tasks"]], ensure_ascii=False, separators=(",", ":")))
 
     def validate(r: SemanticReview) -> list[str]:
         return [f"Constat {i}: id inexistant '{x}' (ids valides uniquement)."

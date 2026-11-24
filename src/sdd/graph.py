@@ -153,7 +153,17 @@ def _checklist(state: SDDState) -> str:
 
 
 def _dump(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=1)
+    """JSON compact : même contenu, sans indentation (des centaines de tokens de moins par appel, ce qui
+    compte face aux limites par minute des offres gratuites, ex. 8 000 tokens chez Groq)."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _fmt_files(files: dict[str, str]) -> str:
+    """Fichiers du projet en texte brut (un bloc par fichier) plutôt qu'en JSON : le code n'est pas alourdi
+    par l'échappement des retours à la ligne et des guillemets, et reste identique au caractère près."""
+    if not files:
+        return "(aucun)"
+    return "\n".join(f"===== {path} =====\n{content}" for path, content in files.items())
 
 
 def _add_human_input(state: SDDState, answers: dict[str, str], feedback: str, open_questions: list[dict]) -> list[dict]:
@@ -345,10 +355,10 @@ def build_graph(
         items = [i for i in state["plan"]["items"] if i["id"] in task.plan_item_ids]
         human = [s for s in state["sources"] if s["origin"] in ("feedback", "answer")]
         payload = (
-            f"TÂCHE :\n{task.model_dump_json(indent=1)}\n\nEXIGENCES :\n{_dump(reqs)}\n\n"
+            f"TÂCHE :\n{task.model_dump_json()}\n\nEXIGENCES :\n{_dump(reqs)}\n\n"
             f"ÉLÉMENTS DU PLAN :\n{_dump(items)}\n\n"
             f"CHOIX TECHNIQUES :\n{_dump(state['plan'].get('tech_choices', []))}\n\n"
-            f"FICHIERS DU PROJET (déjà écrits) :\n{_dump(_read_workspace(ws))}\n\n"
+            f"FICHIERS DU PROJET (déjà écrits) :\n{_fmt_files(_read_workspace(ws))}\n\n"
             f"RÉPONSES ET RETOURS HUMAINS :\n{_dump(human)}"
         )
         impl, errs = gen(
@@ -378,7 +388,7 @@ def build_graph(
         payload = (
             f"SORTIE DES TESTS :\n{state['verify']['output']}\n\n"
             f"ALLOWED_FILES :\n{_dump(fixable_files(tl))}\n\n"
-            f"FICHIERS DU PROJET :\n{_dump(_read_workspace(ws))}\n\n"
+            f"FICHIERS DU PROJET :\n{_fmt_files(_read_workspace(ws))}\n\n"
             f"EXIGENCES :\n{_dump(state['spec']['requirements'])}\n\n"
             f"RETOURS HUMAINS :\n{_dump(feedback)}"
         )

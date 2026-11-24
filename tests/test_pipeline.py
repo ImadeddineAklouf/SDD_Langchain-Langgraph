@@ -512,3 +512,14 @@ def test_error_after_answers_keeps_answers_and_no_stale_pause(tmp_path):
     llm.queues["Spec"] = [spec_citing_answer()]
     pause = advance(g, None, cfg)  # « Reprendre là où le workflow s'est arrêté »
     assert pause["kind"] == "checkpoint" and pause["open_questions"] == []
+
+
+def test_payloads_are_compact_and_files_stay_verbatim():
+    """Moins de tokens par appel (limites par minute des offres gratuites), sans rien perdre du contenu."""
+    from sdd.graph import _dump, _fmt_files
+
+    assert _dump({"id": "REQ-001", "text": "é"}) == '{"id":"REQ-001","text":"é"}'
+    code = 'def f():\n    return "ok"\n'
+    out = _fmt_files({"src/a.py": code})
+    assert out == f"===== src/a.py =====\n{code}" and "\\n" not in out
+    assert _fmt_files({}) == "(aucun)"

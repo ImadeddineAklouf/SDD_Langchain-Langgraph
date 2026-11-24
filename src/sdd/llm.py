@@ -181,9 +181,46 @@ def is_api_error(exc: Exception) -> bool:
 
     if isinstance(exc, (ModelError, AllModelsFailed)):
         return True
-    if _is_network_error(exc):
+    if _is_network_error(exc) or is_request_too_large(exc):
         return True
-    return getattr(exc, "status_code", None) in (401, 403, 404, 429)
+    return getattr(exc, "status_code", None) in (401, 403, 404, 413, 429)
+
+
+_TOO_LARGE = re.compile(r"request too large|reduce your message size|request entity too large|payload too large", re.I)
+_LIMIT_REQUESTED = re.compile(r"Limit\W+(\d+)\W+Requested\W+(\d+)", re.I)
+
+
+def is_request_too_large(exc: Exception) -> bool:
+    """La requête dépasse ce que le fournisseur accepte EN UNE FOIS (HTTP 413, ou 429 dont la taille demandée
+    excède la limite par minute, comme Groq gratuit : « Limit 8000, Requested 8604 »).
+
+    Ni attendre, ni redemander une correction (qui ALLONGE la requête) ne peut réussir : il faut un autre
+    fournisseur. Avant, ce 413 était pris pour une « sortie non conforme au schéma » et redemandé en boucle."""
+    text = str(exc)
+    if getattr(exc, "status_code", None) == 413 or _TOO_LARGE.search(text):
+        return True
+    m = _LIMIT_REQUESTED.search(text)
+    return bool(m) and int(m.group(2)) > int(m.group(1))
+
+
+def _provider_of(llm) -> str | None:
+    """Fournisseur d'un modèle LangChain, d'après sa classe (ChatGroq, ChatGoogleGenerativeAI, ChatOllama)."""
+    name = type(llm).__name__.lower()
+    for p, key in (("groq", "groq"), ("gemini", "google"), ("ollama", "ollama")):
+        if key in name:
+            return p
+    return None
+
+
+def rescue_llm(failed_provider: str | None):
+    """Modèle de dernier recours quand la requête est trop grosse pour le fournisseur en cause : Gemini (fenêtre
+    et quota par minute bien plus larges) si sa clé est présente et qu'il n'est pas lui-même en cause.
+    Désactivé si l'utilisateur a choisi « (aucun) » comme secours (SDD_FALLBACK_MODEL vide)."""
+    if failed_provider == "gemini" or not os.getenv(API_KEYS["gemini"]):
+        return None
+    if "SDD_FALLBACK_MODEL" in os.environ and not os.environ["SDD_FALLBACK_MODEL"].strip():
+        return None
+    return get_llm(DEFAULTS["gemini"], "gemini")
 
 
 def explain_error(exc: Exception) -> str:
@@ -200,6 +237,14 @@ def explain_error(exc: Exception) -> str:
               "secours dans la barre latérale.")
     detail = str(exc)[:400]
     status = getattr(exc, "status_code", None)
+    if is_request_too_large(exc):
+        m = _LIMIT_REQUESTED.search(str(exc))
+        size = (f" : {m.group(2)} tokens demandés pour une limite de {m.group(1)} tokens par minute" if m else "")
+        who = "Groq" if "groq" in type(exc).__module__.lower() or "gpt-oss" in str(exc) else "du fournisseur"
+        return (f"Requête trop volumineuse pour l'offre gratuite {who}{size}. Attendre ou réessayer ne changera "
+                "rien. Choisissez « gemini » comme fournisseur dans la barre latérale (limites bien plus larges), "
+                "ou ajoutez GOOGLE_API_KEY dans .env pour que la bascule vers Gemini se fasse toute seule, puis "
+                f"cliquez sur « Reprendre ». Détail : {detail}")
     if isinstance(exc, ModelNotFoundError) or status == 404:
         return (f"Modèle introuvable pour cette clé. Choisissez un autre modèle dans la barre "
                 f"latérale (ou SDD_MODEL dans .env). Détail : {detail}")
@@ -258,7 +303,7 @@ def rate_limit_wait(exc: Exception) -> float | None:
     if not (isinstance(exc, ModelRateLimitError) or getattr(exc, "status_code", None) == 429
             or "429" in text or "RESOURCE_EXHAUSTED" in text):
         return None
-    if _DAILY.search(text):
+    if _DAILY.search(text) or is_request_too_large(exc):  # quota du jour, ou requête plus grosse que la limite
         return None
     wait = None
     headers = getattr(getattr(exc, "response", None), "headers", None) or {}
@@ -334,11 +379,14 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     prompt = ChatPromptTemplate.from_messages(
         [("system", system), ("human", "{input}"), MessagesPlaceholder("corrections", optional=True)]
     )
-    chains = [(f"principal ({_model_label(llm)})",
-               prompt | llm.with_structured_output(schema, method=structured_method()))]  # LCEL
+    def chain_of(role: str, model) -> tuple[str, object, str | None]:
+        return (f"{role} ({_model_label(model)})",
+                prompt | model.with_structured_output(schema, method=structured_method()),  # LCEL
+                _provider_of(model))
+
+    chains = [chain_of("principal", llm)]
     if fallback_llm is not None:
-        chains.append((f"secours ({_model_label(fallback_llm)})",
-                       prompt | fallback_llm.with_structured_output(schema, method=structured_method())))
+        chains.append(chain_of("secours", fallback_llm))
     failures: list[tuple[str, Exception]] = []
     corrections: list = []
     obj, errors = None, ["Aucune sortie."]
@@ -348,7 +396,7 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
     for attempt in range(1, max_retries + 2):
         answered = False
         while not answered:
-            label, chain = chains[0]
+            label, chain, prov = chains[0]
             _progress(f"{step} : appel au modèle {label} (essai {attempt}/{max_retries + 1}, "
                       f"délai max {deadline:.0f} s)…")
             t0 = time.monotonic()
@@ -368,11 +416,17 @@ def generate(llm, schema, system: str, payload: str, validate, max_retries: int,
                 if is_api_error(exc):  # clé, modèle introuvable, réseau, délai, quota : inutile de redemander
                     _progress(f"{step} : échec du modèle {label} après {time.monotonic() - t0:.0f} s : "
                               f"{type(exc).__name__} {str(exc)[:120]}")
-                    if len(chains) > 1:
+                    failed = chains.pop(0)
+                    if is_request_too_large(exc) and prov:
+                        # même fournisseur = même limite de taille : inutile d'essayer son autre modèle
+                        chains = [c for c in chains if c[2] != prov]
+                        if not chains and (rescue := rescue_llm(prov)) is not None:
+                            chains.append(chain_of("secours", rescue))
+                    if chains:
                         failures.append((label, exc))
-                        chains.pop(0)  # bascule sur le secours pour le reste de l'étape
-                        _progress(f"{step} : bascule sur le modèle de secours")
+                        _progress(f"{step} : bascule sur le modèle {chains[0][0]}")
                         continue
+                    chains.insert(0, failed)
                     if failures:
                         raise AllModelsFailed(failures + [(label, exc)]) from exc
                     raise

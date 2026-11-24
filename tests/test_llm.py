@@ -204,3 +204,88 @@ def test_both_errors_shown_when_primary_and_fallback_fail():
     msg = llm.explain_error(err.value)
     assert "gemini-3.8-flash" in msg and "introuvable" in msg
     assert "openai/gpt-oss-120b" in msg and "JOURNALIER" in msg
+
+
+GROQ_413 = ("Error code: 413 - {'error': {'message': 'Request too large for model openai/gpt-oss-120b in organization "
+            "org_x service tier on_demand on tokens per minute (TPM): Limit 8000, Requested 8604, please reduce your "
+            "message size and try again.'}}")
+
+
+class _StatusError(Exception):
+    def __init__(self, msg, code):
+        super().__init__(msg)
+        self.status_code = code
+
+
+def _fake_model(cls_name, model, outputs):
+    """Faux modèle LangChain dont la classe porte le nom du vrai (ChatGroq…) ; `outputs` : exception ou objet."""
+    from langchain_core.runnables import RunnableLambda
+
+    calls = []
+
+    def with_structured_output(self, schema, **_kw):
+        def run(_inp):
+            calls.append(model)
+            out = outputs.pop(0) if len(outputs) > 1 else outputs[0]
+            if isinstance(out, Exception):
+                raise out
+            return out
+        return RunnableLambda(run)
+
+    cls = type(cls_name, (), {"with_structured_output": with_structured_output})
+    m = cls()
+    m.model, m.calls = model, calls
+    return m
+
+
+def test_groq_413_request_too_large_is_an_api_error_with_a_clear_french_message():
+    exc = _StatusError(GROQ_413, 413)
+    assert llm.is_request_too_large(exc) and llm.is_api_error(exc)
+    assert llm.rate_limit_wait(exc) is None  # attendre ne sert à rien
+    msg = llm.explain_error(exc)
+    assert msg.startswith("Requête trop volumineuse") and "8604 tokens demandés" in msg and "8000" in msg
+    assert "Reprendre" in msg and "gemini" in msg
+    # même message de taille renvoyé en 429 : ce n'est pas une limite qu'une attente peut lever
+    as_429 = _StatusError(GROQ_413.replace("413", "429"), 429)
+    assert llm.is_request_too_large(as_429) and llm.rate_limit_wait(as_429) is None
+    # un vrai 429 par minute (taille < limite) reste une attente
+    tpm = _StatusError("Rate limit reached on tokens per minute (TPM): Limit 8000, Used 7000, Requested 2000. "
+                       "Please try again in 4.5s", 429)
+    assert not llm.is_request_too_large(_StatusError("Limit 8000, Requested 500", 429))
+    assert llm.rate_limit_wait(tpm) is not None
+
+
+def test_413_is_not_retried_as_a_schema_error_and_skips_same_provider_backup(monkeypatch):
+    """Avant : le 413 était pris pour une sortie hors schéma, redemandé avec une correction (requête encore plus
+    grosse), puis « aucune sortie valide ». Maintenant : arrêt immédiat, et le secours Groq (même limite) est sauté."""
+    import pytest
+    from sdd.models import Spec
+
+    groq = _fake_model("ChatGroq", "openai/gpt-oss-120b", [_StatusError(GROQ_413, 413)])
+    groq_small = _fake_model("ChatGroq", "openai/gpt-oss-20b", [_StatusError(GROQ_413, 413)])
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(Exception) as err:
+        llm.generate(groq, Spec, "s", "x", lambda o: [], 3, fallback_llm=groq_small)
+    assert groq.calls == ["openai/gpt-oss-120b"]  # un seul appel, pas 4
+    assert groq_small.calls == []                 # même fournisseur = même limite : inutile
+    assert "Requête trop volumineuse" in llm.explain_error(err.value)
+
+
+def test_413_on_groq_switches_to_gemini_when_its_key_is_present(monkeypatch):
+    groq = _fake_model("ChatGroq", "openai/gpt-oss-120b", [_StatusError(GROQ_413, 413)])
+    gemini = _fake_model("ChatGoogleGenerativeAI", "gemini-3.8-flash", [{"ok": True}])
+    monkeypatch.setenv("GOOGLE_API_KEY", "x")
+    monkeypatch.delenv("SDD_FALLBACK_MODEL", raising=False)
+    monkeypatch.setattr(llm, "get_llm", lambda model=None, prov=None: gemini)
+
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        ok: bool
+
+    obj, errs = llm.generate(groq, Out, "s", "x", lambda o: [], 2)
+    assert obj.ok and errs == [] and gemini.calls == ["gemini-3.8-flash"]
+    # secours désactivé (« (aucun) ») : pas de bascule implicite
+    monkeypatch.setenv("SDD_FALLBACK_MODEL", "")
+    assert llm.rescue_llm("groq") is None
+    assert llm.rescue_llm("gemini") is None

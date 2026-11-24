@@ -105,7 +105,7 @@ def apply_corrections(doc: dict, ops: list[PatchOp], model_cls, validate: Callab
 def correction_payload(kind: str, alerts: list[dict], doc: dict, sources_txt: str, context: str) -> str:
     lines = "\n".join(f"- [{a['code']}] {a['message']}" for a in alerts)
     return (f"ALERTES DU GARDIEN SUR L'ARTEFACT « {kind} » :\n{lines}\n\nARTEFACT ({kind}) :\n"
-            f"{json.dumps(doc, ensure_ascii=False, indent=1)}\n\nSOURCES :\n{sources_txt}{context}")
+            f"{json.dumps(doc, ensure_ascii=False, separators=(",", ":"))}\n\nSOURCES :\n{sources_txt}{context}")
 
 
 __all__ = ["CORRECTABLE", "Correction", "apply_corrections", "apply_patch", "correctable", "correction_payload"]
